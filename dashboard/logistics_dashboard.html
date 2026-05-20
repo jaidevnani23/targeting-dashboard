@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>India Logistics Intelligence</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root {
+  --bg: #F2F4F7; --white: #FFFFFF; --navy: #0D2240; --blue: #1A56B8;
+  --blue-lt: #EBF2FF; --teal: #0B7A6B; --teal-lt: #E6F5F3; --bdr: #DDE3ED;
+  --txt: #111827; --txt2: #374151; --txt3: #6B7280; --txt4: #9CA3AF;
+  --green: #15803D; --green-lt: #DCFCE7; --amber: #92400E; --amber-lt: #FEF3C7;
+  --row-alt: #F8FAFD;
+}
+
+[data-theme="dark"] {
+  --bg: #000000; --white: #1A1A1A; --navy: #2D3748; --blue: #60A5FA;
+  --blue-lt: #1E3A5F; --teal: #2DD4BF; --teal-lt: #1E4D47; --bdr: #374151;
+  --txt: #F9FAFB; --txt2: #E5E7EB; --txt3: #9CA3AF; --txt4: #6B7280;
+  --green: #34D399; --green-lt: #1F4D38; --amber: #FBBF24; --amber-lt: #78350F;
+  --row-alt: #0D0D0D;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 13px; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--txt); min-height: 100vh; }
+.shell { max-width: 1600px; margin: 0 auto; padding: 16px; }
+
+/* Top bar */
+.topbar { display: flex; align-items: center; gap: 12px; background: var(--navy); color: #fff; padding: 12px 20px; border-radius: 10px 10px 0 0; }
+.topbar-title { font-size: 15px; font-weight: 700; flex: 1; }
+.topbar-title span { opacity: .6; font-weight: 400; font-size: 12px; margin-left: 8px; }
+.side-toggle { display: flex; gap: 4px; background: rgba(255,255,255,.12); padding: 4px; border-radius: 8px; }
+.side-btn { padding: 6px 16px; border-radius: 6px; font-size: 12px; font-weight: 600; border: none; cursor: pointer; color: rgba(255,255,255,.7); background: transparent; transition: all .15s; }
+.side-btn.active { background: #fff; color: var(--navy); }
+.refresh-btn { padding: 7px 14px; border-radius: 7px; font-size: 12px; font-weight: 600; border: 1.5px solid rgba(255,255,255,.3); background: rgba(255,255,255,.1); color: #fff; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
+.refresh-btn:hover { background: rgba(255,255,255,.2); }
+.refresh-btn.spinning svg { animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Controls */
+.ctrlbar { background: var(--white); border: 1px solid var(--bdr); border-top: none; padding: 10px 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.ctrl-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1; }
+select, input[type=text] { padding: 6px 10px; border: 1.5px solid var(--bdr); border-radius: 6px; font-size: 12px; color: var(--txt); background: var(--white); outline: none; transition: border-color .15s; }
+select:focus, input[type=text]:focus { border-color: var(--blue); }
+input[type=text] { min-width: 190px; }
+.filter-label { font-size: 11px; font-weight: 600; color: var(--txt3); white-space: nowrap; }
+
+/* Upload */
+.upload-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.upload-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1.5px solid var(--bdr); background: var(--white); color: var(--txt2); cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
+.upload-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--white); }
+.upload-hint { font-size: 11px; color: var(--txt4); }
+.file-badge { padding: 4px 10px; background: var(--blue-lt); color: var(--blue); border-radius: 20px; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
+.file-badge.supply { background: var(--teal-lt); color: var(--teal); }
+.file-badge.trends { background: var(--blue-lt); color: var(--blue); }
+
+[data-theme="dark"] .file-badge.trends { background: #3B2E5C; color: #C4B5FD; }
+
+/* Stats */
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px; background: var(--bdr); border: 1px solid var(--bdr); border-top: none; }
+.stat-cell { background: var(--white); padding: 14px 16px; }
+.stat-val { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1; }
+.stat-lbl { font-size: 10px; font-weight: 600; color: var(--txt3); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+
+/* Table */
+.table-wrap { background: var(--white); border: 1px solid var(--bdr); border-top: none; border-radius: 0 0 10px 10px; overflow: hidden; }
+.table-scroll { overflow-x: auto; max-height: 62vh; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; }
+thead { position: sticky; top: 0; z-index: 2; }
+th { padding: 9px 12px; text-align: left; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--txt2); background: #F4F6FA; border-bottom: 2px solid var(--bdr); white-space: nowrap; cursor: pointer; user-select: none; }
+th:hover { background: #EDF0F7; }
+th .sort-icon { margin-left: 4px; opacity: .4; font-size: 10px; }
+th.sorted .sort-icon { opacity: 1; color: var(--blue); }
+td { padding: 7px 12px; font-size: 12px; color: var(--txt); border-bottom: 1px solid #F0F2F6; white-space: nowrap; }
+td.wrap { white-space: normal; max-width: 280px; }
+td.peak-cell { white-space: normal; max-width: 220px; }
+tbody tr:nth-child(even) td { background: var(--row-alt); }
+tbody tr:hover td { background: #EEF3FB !important; }
+
+/* Trend tags */
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.tag-rising { background: var(--green-lt); color: var(--green); }
+.tag-stable { background: var(--blue-lt); color: var(--blue); }
+.tag-declining { background: var(--amber-lt); color: var(--amber); }
+
+/* Peak month pills */
+.peak-pills { display: flex; flex-wrap: wrap; gap: 3px; }
+.pill {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 600; white-space: nowrap;
+  background: #FFF7ED; color: #C2410C; border: 1px solid #FED7AA;
+}
+.pill-none { color: var(--txt4); font-size: 11px; font-style: italic; }
+
+/* Pagination */
+.pagebar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid var(--bdr); background: #FAFBFD; }
+.pagebar-info { font-size: 11px; color: var(--txt3); }
+.page-btns { display: flex; gap: 4px; }
+.pg-btn { padding: 4px 10px; border: 1.5px solid var(--bdr); background: var(--white); border-radius: 5px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--txt3); transition: all .12s; }
+.pg-btn:hover { border-color: var(--navy); color: var(--navy); }
+.pg-btn.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+.pg-btn:disabled { opacity: .35; cursor: not-allowed; }
+
+.empty { padding: 60px 20px; text-align: center; color: var(--txt4); font-size: 13px; }
+.empty-icon { font-size: 36px; margin-bottom: 10px; opacity: .5; }
+
+.loading-overlay { position: fixed; inset: 0; background: rgba(255,255,255,.8); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+.loading-overlay.show { display: flex; }
+.spinner { width: 36px; height: 36px; border: 3px solid var(--bdr); border-top-color: var(--blue); border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 12px; }
+.loading-msg { font-size: 13px; color: var(--txt3); font-weight: 500; }
+
+/* Dark mode toggle */
+.dark-mode-toggle { 
+  position: fixed; 
+  bottom: 20px; 
+  left: 20px; 
+  padding: 10px 16px;
+  border-radius: 8px; 
+  background: var(--white); 
+  border: 2px solid var(--bdr); 
+  cursor: pointer; 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+  font-size: 12px; 
+  font-weight: 600;
+  color: var(--txt2);
+  transition: all .2s ease; 
+  box-shadow: 0 4px 12px rgba(0,0,0,.1); 
+  z-index: 50;
+  white-space: nowrap;
+}
+.dark-mode-toggle:hover { 
+  transform: translateY(-2px); 
+  box-shadow: 0 6px 16px rgba(0,0,0,.15); 
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.dark-mode-toggle:active { 
+  transform: translateY(0); 
+}
+
+[data-theme="dark"] .loading-overlay { background: rgba(0,0,0,.9); }
+[data-theme="dark"] th { background: #262626; }
+[data-theme="dark"] th:hover { background: #333333; }
+[data-theme="dark"] tbody tr:hover td { background: #1F1F1F !important; }
+[data-theme="dark"] .pagebar { background: #0A0A0A; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar">
+    <div class="topbar-title">🚚 India Logistics Intelligence <span id="last-updated"></span></div>
+    <div class="side-toggle">
+      <button class="side-btn active" id="btn-demand" onclick="switchSide('demand')">📊 Demand</button>
+      <button class="side-btn" id="btn-supply" onclick="switchSide('supply')">🏭 Supply</button>
+    </div>
+    <button class="refresh-btn" id="refresh-btn" onclick="refreshData()">
+      <svg id="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Refresh
+    </button>
+  </div>
+
+  <div class="ctrlbar" id="ctrlbar">
+    <div class="ctrl-group" id="demand-filters">
+      <span class="filter-label">Filter:</span>
+      <input type="text" id="d-search" placeholder="Search product, state…" oninput="applyFilters()">
+      <select id="d-state" onchange="applyFilters()"><option value="">All States</option></select>
+      <select id="d-category" onchange="applyFilters()"><option value="">All Categories</option></select>
+      <select id="d-trend" onchange="applyFilters()">
+        <option value="">All Trends</option>
+        <option value="Rising">📈 Rising</option>
+        <option value="Stable">➡️ Stable</option>
+        <option value="Declining">📉 Declining</option>
+      </select>
+      <select id="d-peakmonth" onchange="applyFilters()"><option value="">All Peak Months</option></select>
+    </div>
+    <div class="ctrl-group" id="supply-filters" style="display:none">
+      <span class="filter-label">Filter:</span>
+      <input type="text" id="s-search" placeholder="Search enterprise, NIC…" oninput="applyFilters()">
+      <select id="s-state" onchange="applyFilters()"><option value="">All States</option></select>
+      <select id="s-district" onchange="applyFilters()"><option value="">All Districts</option></select>
+      <select id="s-category" onchange="applyFilters()"><option value="">All Categories</option></select>
+      <select id="s-niccode" onchange="applyFilters()"><option value="">All NIC Codes</option></select>
+    </div>
+    <div class="upload-strip">
+      <label class="upload-btn">
+        <input type="file" accept=".xlsx,.xls,.csv" style="display:none" id="trends-upload" onchange="handleUpload('trends')">
+        📤 Upload Demand/Trends
+      </label>
+      <label class="upload-btn">
+        <input type="file" accept=".xlsx,.xls,.csv,.xlsb" style="display:none" id="supply-upload" onchange="handleUpload('supply')">
+        📤 Upload Supply
+      </label>
+      <span class="file-badge" id="trends-file-badge" style="display:none">✓ Demand/Trends</span>
+      <span class="file-badge supply" id="supply-file-badge" style="display:none">✓ Supply</span>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-cell"><div class="stat-val" id="stat-total">0</div><div class="stat-lbl">Total Rows</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-filtered">0</div><div class="stat-lbl">Filtered Rows</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-extra1">0</div><div class="stat-lbl" id="stat-extra1-lbl">—</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-extra2">0</div><div class="stat-lbl" id="stat-extra2-lbl">—</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-extra3">0</div><div class="stat-lbl" id="stat-extra3-lbl">—</div></div>
+  </div>
+
+  <div class="table-wrap">
+    <div class="table-scroll">
+      <table>
+        <thead id="table-head"></thead>
+        <tbody id="table-body"></tbody>
+      </table>
+    </div>
+    <div class="pagebar">
+      <div class="pagebar-info" id="page-info"></div>
+      <div class="page-btns" id="page-btns"></div>
+    </div>
+  </div>
+
+</div>
+
+<button class="dark-mode-toggle" id="dark-mode-toggle" onclick="toggleDarkMode()">
+  <span id="theme-text">Dark Mode</span>
+</button>
+
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner"></div>
+  <div class="loading-msg" id="loading-msg">Loading data…</div>
+</div>
+
+<script>
+// ── STATE ─────────────────────────────────────────────────────────────────────
+let demandData   = [];
+let supplyData   = [];
+let trendsMap    = {}; // NIC code -> Category mapping from trends file
+let filteredData = [];
+let currentSide  = 'demand';
+let currentPage  = 1;
+let sortCol      = null;
+let sortDir      = 1;
+const PAGE_SIZE  = 50;
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+// (initialization moved to dark mode handler below)
+
+// ── FILE UPLOAD ───────────────────────────────────────────────────────────────
+function handleUpload(type) {
+  const input = document.getElementById(`${type}-upload`);
+  const file  = input.files[0];
+  if (!file) return;
+
+  showLoading(`Reading ${type} file…`);
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const wb   = XLSX.read(e.target.result, { type: 'binary' });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(ws);
+
+      if (type === 'trends') {
+        // Use trends file as demand data
+        demandData = json;
+        
+        // Also build NIC code -> Category mapping for supply side
+        trendsMap = {};
+        json.forEach(row => {
+          const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
+          const cat = row['Category'];
+          if (nic && cat) trendsMap[String(nic)] = cat;
+        });
+        
+        document.getElementById('trends-file-badge').style.display = 'flex';
+        
+        // Re-enrich supply data with new categories if supply data exists
+        if (supplyData.length > 0) {
+          supplyData = supplyData.map(row => enrichSupplyWithCategory(row));
+        }
+        
+        applyFilters();
+      } else if (type === 'supply') {
+        supplyData = json.map(row => enrichSupplyWithCategory(row));
+        document.getElementById('supply-file-badge').style.display = 'flex';
+        if (currentSide === 'supply') applyFilters();
+      }
+      
+      updateLastUpdated();
+      hideLoading();
+    } catch (err) {
+      console.error(err);
+      alert(`Error reading ${type} file: ${err.message}`);
+      hideLoading();
+    }
+  };
+  reader.readAsBinaryString(file);
+}
+
+// Enrich supply row with Category from trendsMap based on NIC_Code
+function enrichSupplyWithCategory(row) {
+  const nicCode = row['NIC_Code'] || row['NIC Code'] || row['NICCode'];
+  if (nicCode && trendsMap[String(nicCode)]) {
+    row['Category'] = trendsMap[String(nicCode)];
+  }
+  return row;
+}
+
+// ── SIDE SWITCH ───────────────────────────────────────────────────────────────
+function switchSide(side) {
+  currentSide = side;
+  currentPage = 1;
+  sortCol = null; sortDir = 1;
+  
+  document.getElementById('btn-demand').classList.toggle('active', side === 'demand');
+  document.getElementById('btn-supply').classList.toggle('active', side === 'supply');
+  document.getElementById('demand-filters').style.display = side === 'demand' ? 'flex' : 'none';
+  document.getElementById('supply-filters').style.display = side === 'supply' ? 'flex' : 'none';
+  
+  applyFilters();
+}
+
+// ── FILTERS ───────────────────────────────────────────────────────────────────
+function applyFilters() {
+  const all = currentSide === 'demand' ? demandData : supplyData;
+  let data  = [...all];
+
+  if (currentSide === 'demand') {
+    const search   = document.getElementById('d-search').value.toLowerCase();
+    const state    = document.getElementById('d-state').value;
+    const category = document.getElementById('d-category').value;
+    const trend    = document.getElementById('d-trend').value;
+    const peak     = document.getElementById('d-peakmonth').value;
+
+    if (search)   data = data.filter(r => 
+      (r['Product']||'').toLowerCase().includes(search) ||
+      (r['State']||'').toLowerCase().includes(search) ||
+      (r['Category']||'').toLowerCase().includes(search)
+    );
+    if (state)    data = data.filter(r => r['State'] === state);
+    if (category) data = data.filter(r => r['Category'] === category);
+    if (trend)    data = data.filter(r => (r['Trend_Direction']||'').includes(trend));
+    if (peak)     data = data.filter(r => getPeakMonths(r).includes(peak));
+  } else {
+    const search   = document.getElementById('s-search').value.toLowerCase();
+    const state    = document.getElementById('s-state').value;
+    const district = document.getElementById('s-district').value;
+    const category = document.getElementById('s-category').value;
+    const niccode  = document.getElementById('s-niccode').value;
+
+    if (search)   data = data.filter(r =>
+      (r['EnterpriseName']||'').toLowerCase().includes(search) ||
+      String(r['NIC_Code']||'').includes(search) ||
+      (r['NIC_Description']||'').toLowerCase().includes(search)
+    );
+    if (state)    data = data.filter(r => r['State'] === state);
+    if (district) data = data.filter(r => r['District'] === district);
+    if (category) data = data.filter(r => r['Category'] === category);
+    if (niccode)  data = data.filter(r => String(r['NIC_Code']) === niccode);
+  }
+
+  // Sort
+  if (sortCol) {
+    data.sort((a, b) => {
+      let aVal = a[sortCol] ?? '';
+      let bVal = b[sortCol] ?? '';
+      if (typeof aVal === 'string') aVal = aVal.toLowerCase();
+      if (typeof bVal === 'string') bVal = bVal.toLowerCase();
+      return (aVal < bVal ? -1 : aVal > bVal ? 1 : 0) * sortDir;
+    });
+  }
+
+  filteredData = data;
+  currentPage  = 1;
+  renderTable();
+  updateStats();
+  buildFilterOptions();
+}
+
+// ── BUILD FILTER DROPDOWNS ────────────────────────────────────────────────────
+function buildFilterOptions() {
+  const all = currentSide === 'demand' ? demandData : supplyData;
+
+  if (currentSide === 'demand') {
+    const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
+    const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
+    const peaks      = [...new Set(all.flatMap(r => getPeakMonths(r)))].sort();
+
+    fillSelect('d-state', states);
+    fillSelect('d-category', categories);
+    fillSelect('d-peakmonth', peaks);
+  } else {
+    const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
+    const districts  = [...new Set(all.map(r => r['District']).filter(Boolean))].sort();
+    const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
+    const niccodes   = [...new Set(all.map(r => String(r['NIC_Code']).filter(Boolean)))].sort();
+
+    fillSelect('s-state', states);
+    fillSelect('s-district', districts);
+    fillSelect('s-category', categories);
+    fillSelect('s-niccode', niccodes);
+  }
+}
+
+function fillSelect(id, opts) {
+  const sel = document.getElementById(id);
+  const curr = sel.value;
+  const first = sel.options[0].text;
+  sel.innerHTML = `<option value="">${first}</option>` + opts.map(v => `<option value="${v}">${v}</option>`).join('');
+  if (opts.includes(curr)) sel.value = curr;
+}
+
+// ── PEAK MONTHS HELPER ────────────────────────────────────────────────────────
+function getPeakMonths(row) {
+  const months = [];
+  for (let i = 1; i <= 20; i++) {
+    const m = row[`Top_${i}_Month`];
+    if (m) months.push(m);
+  }
+  return months;
+}
+
+// ── COLUMN DEFINITIONS ────────────────────────────────────────────────────────
+const DEMAND_COLS = [
+  { key: 'State',            label: 'State' },
+  { key: 'Product',          label: 'Product', wrap: true },
+  { key: 'NIC Code',         label: 'NIC Code' },
+  { key: 'Category',         label: 'Category' },
+  { key: 'Trend_Direction',  label: 'Trend', trend: true },
+  { key: 'Last_Updated',     label: 'Last Updated' },
+  { peak: true,              label: 'Peak Months' },
+];
+
+const SUPPLY_COLS = [
+  { key: 'State',            label: 'State' },
+  { key: 'District',         label: 'District' },
+  { key: 'Pincode',          label: 'Pincode' },
+  { key: 'EnterpriseName',   label: 'Enterprise Name', wrap: true },
+  { key: 'NIC_Code',         label: 'NIC Code' },
+  { key: 'NIC_Description',  label: 'NIC Description', wrap: true },
+  { key: 'Category',         label: 'Category' },
+];
+
+// ── RENDER TABLE ──────────────────────────────────────────────────────────────
+function renderTable() {
+  const cols  = currentSide === 'demand' ? DEMAND_COLS : SUPPLY_COLS;
+  const thead = document.getElementById('table-head');
+  const tbody = document.getElementById('table-body');
+
+  thead.innerHTML = '<tr>' + cols.map(c => {
+    const sorted = sortCol === c.key;
+    const icon   = sorted ? (sortDir === 1 ? '▲' : '▼') : '⇅';
+    return `<th class="${sorted ? 'sorted' : ''}" onclick="sortBy('${c.key}')">${c.label} <span class="sort-icon">${icon}</span></th>`;
+  }).join('') + '</tr>';
+
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const page  = filteredData.slice(start, start + PAGE_SIZE);
+
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="${cols.length}"><div class="empty"><div class="empty-icon">🔍</div>${
+      filteredData.length === 0 && (currentSide === 'demand' ? demandData : supplyData).length === 0
+        ? 'Upload a file to get started' : 'No rows match your filters'
+    }</div></td></tr>`;
+    renderPagination(); return;
+  }
+
+  tbody.innerHTML = page.map(row => {
+    return '<tr>' + cols.map(c => {
+      // Peak months computed column (demand side only)
+      if (c.peak) {
+        const months = getPeakMonths(row);
+        if (!months.length) return `<td class="peak-cell"><span class="pill-none">—</span></td>`;
+        const pills = months.map(m => `<span class="pill">${m}</span>`).join('');
+        return `<td class="peak-cell"><div class="peak-pills">${pills}</div></td>`;
+      }
+
+      let val = row[c.key] ?? '';
+      if (c.trend) {
+        const cls = val.includes('Rising') ? 'tag-rising' : val.includes('Declining') ? 'tag-declining' : 'tag-stable';
+        val = `<span class="tag ${cls}">${val}</span>`;
+      } else if (typeof val === 'number') {
+        val = val.toLocaleString();
+      }
+      return `<td class="${c.wrap ? 'wrap' : ''}">${val}</td>`;
+    }).join('') + '</tr>';
+  }).join('');
+
+  renderPagination();
+}
+
+function sortBy(col) {
+  if (sortCol === col) sortDir *= -1; else { sortCol = col; sortDir = 1; }
+  renderTable();
+}
+
+// ── PAGINATION ────────────────────────────────────────────────────────────────
+function renderPagination() {
+  const total = filteredData.length;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const start = (currentPage - 1) * PAGE_SIZE + 1;
+  const end   = Math.min(currentPage * PAGE_SIZE, total);
+  document.getElementById('page-info').textContent =
+    total ? `Rows ${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}` : '';
+
+  const btns = document.getElementById('page-btns');
+  if (totalPages <= 1) { btns.innerHTML = ''; return; }
+
+  let html = `<button class="pg-btn" onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''}>‹ Prev</button>`;
+  const lo = Math.max(1, currentPage-2), hi = Math.min(totalPages, currentPage+2);
+  if (lo > 1) html += `<button class="pg-btn" onclick="goPage(1)">1</button>${lo > 2 ? '<span style="padding:0 4px;color:var(--txt4)">…</span>' : ''}`;
+  for (let i = lo; i <= hi; i++) html += `<button class="pg-btn ${i===currentPage?'active':''}" onclick="goPage(${i})">${i}</button>`;
+  if (hi < totalPages) html += `${hi < totalPages-1 ? '<span style="padding:0 4px;color:var(--txt4)">…</span>' : ''}<button class="pg-btn" onclick="goPage(${totalPages})">${totalPages}</button>`;
+  html += `<button class="pg-btn" onclick="goPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''}>Next ›</button>`;
+  btns.innerHTML = html;
+}
+
+function goPage(p) {
+  const totalPages = Math.ceil(filteredData.length / PAGE_SIZE);
+  if (p < 1 || p > totalPages) return;
+  currentPage = p;
+  renderTable();
+  document.querySelector('.table-scroll')?.scrollTo(0, 0);
+}
+
+// ── STATS ─────────────────────────────────────────────────────────────────────
+function updateStats() {
+  const all = currentSide === 'demand' ? demandData : supplyData;
+  document.getElementById('stat-total').textContent    = all.length.toLocaleString();
+  document.getElementById('stat-filtered').textContent = filteredData.length.toLocaleString();
+
+  if (currentSide === 'demand') {
+    const rising   = filteredData.filter(r => (r['Trend_Direction']||'').includes('Rising')).length;
+    const declining= filteredData.filter(r => (r['Trend_Direction']||'').includes('Declining')).length;
+    const withPeak = filteredData.filter(r => getPeakMonths(r).length > 0).length;
+    set3Stats(rising, 'Rising Trends', declining, 'Declining', withPeak, 'With Peak Data');
+  } else {
+    const states    = new Set(filteredData.map(r => r['State'])).size;
+    const districts = new Set(filteredData.map(r => r['District'])).size;
+    const categories= new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
+    set3Stats(states, 'States', districts, 'Districts', categories, 'Categories');
+  }
+}
+function set3Stats(v1,l1,v2,l2,v3,l3) {
+  document.getElementById('stat-extra1').textContent     = Number(v1).toLocaleString();
+  document.getElementById('stat-extra1-lbl').textContent = l1;
+  document.getElementById('stat-extra2').textContent     = Number(v2).toLocaleString();
+  document.getElementById('stat-extra2-lbl').textContent = l2;
+  document.getElementById('stat-extra3').textContent     = Number(v3).toLocaleString();
+  document.getElementById('stat-extra3-lbl').textContent = l3;
+}
+
+// ── REFRESH ───────────────────────────────────────────────────────────────────
+function refreshData() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('spinning');
+  demandData = []; supplyData = []; trendsMap = {};
+  ['trends-file-badge','supply-file-badge'].forEach(id =>
+    document.getElementById(id).style.display = 'none');
+  filteredData = [];
+  renderTable(); updateStats();
+  setTimeout(() => {
+    btn.classList.remove('spinning');
+    applyFilters();
+    updateLastUpdated();
+  }, 500);
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function showLoading(msg) { document.getElementById('loading-msg').textContent = msg || 'Loading…'; document.getElementById('loading-overlay').classList.add('show'); }
+function hideLoading()    { document.getElementById('loading-overlay').classList.remove('show'); }
+function updateLastUpdated() {
+  const now = new Date();
+  document.getElementById('last-updated').textContent = `Updated ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`;
+}
+
+// ── DARK MODE ─────────────────────────────────────────────────────────────────
+function toggleDarkMode() {
+  const html = document.documentElement;
+  const currentTheme = html.getAttribute('data-theme');
+  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  
+  html.setAttribute('data-theme', newTheme);
+  document.getElementById('theme-text').textContent = newTheme === 'dark' ? 'Light Mode' : 'Dark Mode';
+  
+  // Save preference to localStorage
+  localStorage.setItem('theme', newTheme);
+}
+
+// Load saved theme on page load
+window.addEventListener('DOMContentLoaded', () => {
+  const savedTheme = localStorage.getItem('theme') || 'light';
+  if (savedTheme === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    document.getElementById('theme-text').textContent = 'Light Mode';
+  }
+  
+  // Initialize dashboard
+  applyFilters();
+  updateLastUpdated();
+});
+</script>
+</body>
+</html>
