@@ -1,0 +1,5 @@
+pytrends
+pandas
+openpyxl
+python-dotenv
+urllib3
