@@ -262,7 +262,7 @@ function handleUpload(type) {
 
       if (type === 'trends') {
         // Use trends file as demand data
-        demandData = json;
+        demandData = json.demand_adjustments || json;
         
         // Also build NIC code -> Category mapping for supply side
         trendsMap = {};
