@@ -1,0 +1,38 @@
+name: Update Google Trends Data
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'   # Runs every day at 6 AM UTC (11:30 AM IST)
+  workflow_dispatch:        # Also lets you trigger it manually from GitHub UI
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          BRIGHTDATA_USERNAME: ${{ secrets.BRIGHTDATA_USERNAME }}
+          BRIGHTDATA_PASSWORD: ${{ secrets.BRIGHTDATA_PASSWORD }}
+          BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
+          BRIGHTDATA_PORT: ${{ secrets.BRIGHTDATA_PORT }}
+        run: python google_trends_scraper.py
+
+      - name: Commit updated JSON to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/dashboard_trends_data.json
+          git diff --staged --quiet || git commit -m "Auto-update trends data $(date +'%Y-%m-%d')"
+          git push
