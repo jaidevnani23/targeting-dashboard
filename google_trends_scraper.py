@@ -63,10 +63,14 @@ GEO = "IN"
 #                    BRIGHT DATA PROXY CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
-BRIGHTDATA_USERNAME = "brd-customer-hl_461734ce-zone-datacenter_proxy1"
-BRIGHTDATA_PASSWORD = "9s0thkh4diez"
-BRIGHTDATA_HOST = "brd.superproxy.io"
-BRIGHTDATA_PORT = "33335"
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
+BRIGHTDATA_USERNAME = os.getenv("BRIGHTDATA_USERNAME")
+BRIGHTDATA_PASSWORD = os.getenv("BRIGHTDATA_PASSWORD")
+BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST")
+BRIGHTDATA_PORT     = os.getenv("BRIGHTDATA_PORT")
 
 # ═══════════════════════════════════════════════════════════════════════
 #                    DASHBOARD DATA MAPPING
