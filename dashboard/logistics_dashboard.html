@@ -233,6 +233,25 @@ tbody tr:hover td { background: #EEF3FB !important; }
 
 <script>
 // ── STATE ─────────────────────────────────────────────────────────────────────
+// Auto-load trends JSON from the repo on page open
+async function autoLoadTrendsFromRepo() {
+  const JSON_URL = 'https://raw.githubusercontent.com/jaidevnani23/logistics-trends-automation/main/data/dashboard_trends_data.json';
+  try {
+    showLoading('Fetching latest trends data…');
+    const res  = await fetch(JSON_URL);
+    const json = await res.json();
+    demandData = json;
+    applyFilters();
+    updateLastUpdated();
+    hideLoading();
+  } catch (e) {
+    console.warn('Could not auto-load trends JSON:', e);
+    hideLoading();
+  }
+}
+
+// Call it on page load
+window.addEventListener('DOMContentLoaded', autoLoadTrendsFromRepo);
 let demandData   = [];
 let supplyData   = [];
 let trendsMap    = {}; // NIC code -> Category mapping from trends file
