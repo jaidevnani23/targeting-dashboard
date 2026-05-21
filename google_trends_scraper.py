@@ -38,10 +38,10 @@ from pytrends.request import TrendReq
 #                           CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
-INPUT_EXCEL = "Demand_Excel_Filled.xlsx"
-OUTPUT_EXCEL = "Demand_Excel_With_Trends.xlsx"
-OUTPUT_JSON = "dashboard_trends_data.json"  # Dashboard-ready JSON output
-PROGRESS_FILE = "scraping_progress.json"
+INPUT_EXCEL = "data/Demand_Excel_Filled.xlsx"
+OUTPUT_EXCEL = "data/Demand_Excel_With_Trends.xlsx"
+OUTPUT_JSON = "data/dashboard_trends_data.json"  # Dashboard-ready JSON output
+PROGRESS_FILE = "data/scraping_progress.json"
 
 # Batch configuration
 PRODUCTS_PER_BATCH = 10
