@@ -1,5 +1,6 @@
-json{
+{
+  "outputDirectory": "dashboard",
   "rewrites": [
-    { "source": "/", "destination": "/dashboard/logistics_dashboard.html" }
+    { "source": "/", "destination": "/logistics_dashboard.html" }
   ]
 }
