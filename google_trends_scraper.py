@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
 Google Trends Scraper → Dashboard Automation
-Scrapes Google Trends data and automatically generates dashboard-ready JSON
+Scrapes Google Trends data and automatically generates dashboard-ready JSON.
+Supports resume — partial progress is saved after every product.
 """
 
 import time
 import random
 import pandas as pd
 import json
+import os
 from datetime import datetime, timedelta
 import openpyxl
 from pathlib import Path
 
-# ═══════════════════════════════════════════════════════════════════════
-#                   URLLIB3 COMPATIBILITY PATCH
-# ═══════════════════════════════════════════════════════════════════════
+# ── URLLIB3 COMPATIBILITY PATCH ───────────────────────────────────────────────
 import urllib3
 from urllib3.util.retry import Retry
 
@@ -34,36 +34,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from pytrends.request import TrendReq
 
-# ═══════════════════════════════════════════════════════════════════════
-#                           CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════
-
-INPUT_EXCEL = "data/Demand_Excel_Filled.xlsx"
-OUTPUT_EXCEL = "data/Demand_Excel_With_Trends.xlsx"
-OUTPUT_JSON = "data/dashboard_trends_data.json"  # Dashboard-ready JSON output
-PROGRESS_FILE = "data/scraping_progress.json"
-
-# Batch configuration
-PRODUCTS_PER_BATCH = 10
-TOP_MONTHS_COUNT = 20
-
-# Timing configuration
-MIN_SECONDS_BETWEEN_TERMS = 15.0
-MAX_SECONDS_BETWEEN_TERMS = 60.0
-MIN_MINUTES_BETWEEN_BATCHES = 18
-MAX_MINUTES_BETWEEN_BATCHES = 23
-
-# Google Trends settings
-TIMEFRAME = "today 5-y"
-GEO = "IN"
-
-# ═══════════════════════════════════════════════════════════════════════
-#                    BRIGHT DATA PROXY CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════
-
+# ── CONFIGURATION ─────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
-import os
-
 load_dotenv()
 
 BRIGHTDATA_USERNAME = os.getenv("BRIGHTDATA_USERNAME")
@@ -71,11 +43,20 @@ BRIGHTDATA_PASSWORD = os.getenv("BRIGHTDATA_PASSWORD")
 BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST")
 BRIGHTDATA_PORT     = os.getenv("BRIGHTDATA_PORT")
 
-# ═══════════════════════════════════════════════════════════════════════
-#                    DASHBOARD DATA MAPPING
-# ═══════════════════════════════════════════════════════════════════════
+INPUT_EXCEL   = "data/Demand_Excel_Filled.xlsx"
+OUTPUT_EXCEL  = "data/Demand_Excel_With_Trends.xlsx"
+OUTPUT_JSON   = "data/dashboard_trends_data.json"
+PROGRESS_FILE = "data/scraping_progress.json"
 
-# Month name to index mapping (as used in your dashboard)
+PRODUCTS_PER_BATCH          = 10
+TOP_MONTHS_COUNT            = 20
+MIN_SECONDS_BETWEEN_TERMS   = 15.0
+MAX_SECONDS_BETWEEN_TERMS   = 60.0
+MIN_MINUTES_BETWEEN_BATCHES = 18
+MAX_MINUTES_BETWEEN_BATCHES = 23
+TIMEFRAME                   = "today 5-y"
+GEO                         = "IN"
+
 MONTH_TO_INDEX = {
     'January': 0, 'February': 1, 'March': 2, 'April': 3,
     'May': 4, 'June': 5, 'July': 6, 'August': 7,
@@ -85,89 +66,124 @@ MONTH_TO_INDEX = {
 
 class DashboardTrendsScraper:
     def __init__(self):
-        """Initialize the scraper with Bright Data proxy support"""
         proxy_url = f"http://{BRIGHTDATA_USERNAME}:{BRIGHTDATA_PASSWORD}@{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
-        proxies = [proxy_url]
-        
+
         print(f"🌐 Initializing with Bright Data proxy...")
         print(f"   Host: {BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}")
         print(f"   User: {BRIGHTDATA_USERNAME}")
         print(f"   Geography: India (IN)")
-        
+
         self.pytrends = TrendReq(
-            hl='en-IN',
-            tz=330,
-            timeout=(15, 30),
-            proxies=proxies,
-            retries=2,
-            backoff_factor=0.5,
+            hl='en-IN', tz=330, timeout=(15, 30),
+            proxies=[proxy_url], retries=2, backoff_factor=0.5,
             requests_args={'verify': False}
         )
-        
-        self.progress = self.load_progress()
-        self.dashboard_data = []  # Accumulate dashboard-ready data
+
+        os.makedirs("data", exist_ok=True)
+        self.progress     = self.load_progress()
+        self.dashboard_data = []
         print(f"✅ Proxy configured successfully!\n")
-        
+
+    # ── PROGRESS ──────────────────────────────────────────────────────────────
     def load_progress(self):
-        """Load previous scraping progress"""
         if Path(PROGRESS_FILE).exists():
             with open(PROGRESS_FILE, 'r') as f:
-                progress = json.load(f)
-                if 'failed_attempts' not in progress:
-                    progress['failed_attempts'] = {}
-                if 'total_batches_completed' not in progress:
-                    progress['total_batches_completed'] = 0
-                if 'last_batch_time' not in progress:
-                    progress['last_batch_time'] = None
-                return progress
-        return {
-            'scraped_indices': [],
-            'failed_attempts': {},
-            'total_batches_completed': 0,
-            'last_batch_time': None
-        }
-    
+                p = json.load(f)
+                p.setdefault('failed_attempts', {})
+                p.setdefault('total_batches_completed', 0)
+                p.setdefault('last_batch_time', None)
+                return p
+        return {'scraped_indices': [], 'failed_attempts': {},
+                'total_batches_completed': 0, 'last_batch_time': None}
+
     def save_progress(self):
-        """Save current progress"""
         with open(PROGRESS_FILE, 'w') as f:
             json.dump(self.progress, f, indent=2)
-    
-    def get_highly_random_delay(self, min_seconds, max_seconds):
-        """Generate highly randomized delay with 5 decimal precision"""
-        return round(random.uniform(min_seconds, max_seconds), 5)
-    
+
+    # ── KEY FIX: RELOAD PREVIOUS RESULTS FROM EXCEL ON RESUME ────────────────
+    def reload_dashboard_data_from_excel(self, df):
+        """
+        On resume, rebuild dashboard_data from the partially completed Excel.
+        This ensures the JSON always contains ALL scraped products, not just
+        the ones from the current run.
+        """
+        if not Path(OUTPUT_EXCEL).exists():
+            return
+
+        scraped_indices = set(self.progress['scraped_indices'])
+        if not scraped_indices:
+            return
+
+        print(f"🔄 Reloading {len(scraped_indices)} previously scraped products from Excel...")
+        reloaded = 0
+
+        for idx in sorted(scraped_indices):
+            if idx >= len(df):
+                continue
+            row = df.iloc[idx]
+
+            # Rebuild monthly series from Top_N_Month / Top_N_Value columns
+            top_months = {}
+            for rank in range(1, TOP_MONTHS_COUNT + 1):
+                month_col = f'Top_{rank}_Month'
+                value_col = f'Top_{rank}_Value'
+                if month_col in df.columns and value_col in df.columns:
+                    m = row.get(month_col)
+                    v = row.get(value_col)
+                    if pd.notna(m) and pd.notna(v):
+                        top_months[m] = float(v)
+
+            if not top_months:
+                continue
+
+            product = row.get('Product', 'Unknown')
+            state   = row.get('State', 'All India')
+
+            for month_str, value in top_months.items():
+                try:
+                    dt = datetime.strptime(month_str, '%Y-%m')
+                    month_name  = dt.strftime('%B')
+                    month_index = MONTH_TO_INDEX.get(month_name)
+                    if month_index is None:
+                        continue
+                    demand_score = min(4, int(value / 20))
+                    self.dashboard_data.append({
+                        "product":     product,
+                        "state":       state,
+                        "month_index": month_index,
+                        "new_score":   demand_score,
+                        "trend_value": round(value, 2),
+                        "month_name":  month_name,
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+            reloaded += 1
+
+        print(f"✅ Reloaded {reloaded} products ({len(self.dashboard_data)} demand adjustments) from previous run")
+        # Immediately re-export so the JSON is up to date even if nothing new is scraped
+        self.export_dashboard_json()
+
+    # ── FETCH ─────────────────────────────────────────────────────────────────
+    def get_highly_random_delay(self, min_s, max_s):
+        return round(random.uniform(min_s, max_s), 5)
+
     def parse_search_term(self, search_term):
-        """Parse compound search terms (split by '+')"""
         if not search_term or pd.isna(search_term):
             return []
-        terms = [term.strip() for term in str(search_term).split('+')]
-        return [t for t in terms if t]
-    
+        return [t.strip() for t in str(search_term).split('+') if t.strip()]
+
     def fetch_trends_for_single_term(self, term, retries=3):
-        """Fetch Google Trends data for ONE specific term"""
         for attempt in range(retries):
             try:
                 print(f"      → Querying: '{term}'")
-                
-                self.pytrends.build_payload(
-                    [term],
-                    cat=0,
-                    timeframe=TIMEFRAME,
-                    geo=GEO,
-                    gprop=''
-                )
-                
+                self.pytrends.build_payload([term], cat=0, timeframe=TIMEFRAME, geo=GEO, gprop='')
                 interest_df = self.pytrends.interest_over_time()
-                
                 if interest_df is not None and not interest_df.empty and term in interest_df.columns:
-                    data_points = len(interest_df)
-                    avg_value = interest_df[term].mean()
-                    print(f"      ✓ Got {data_points} months (avg: {avg_value:.1f})")
+                    print(f"      ✓ Got {len(interest_df)} months (avg: {interest_df[term].mean():.1f})")
                     return interest_df[term]
-                else:
-                    print(f"      ⚠ No data for '{term}'")
-                    return None
-                    
+                print(f"      ⚠ No data for '{term}'")
+                return None
             except Exception as e:
                 print(f"      ✗ Error: {str(e)}")
                 if attempt < retries - 1:
@@ -176,285 +192,203 @@ class DashboardTrendsScraper:
                     time.sleep(wait)
                 else:
                     print(f"      ⛔ Failed after {retries} attempts")
-                    return None
-        
         return None
-    
+
     def fetch_trends(self, search_term):
-        """Fetch and aggregate Google Trends data for compound terms"""
         terms = self.parse_search_term(search_term)
-        
         if not terms:
-            print(f"  ⚠️  Empty search term")
+            print("  ⚠️  Empty search term")
             return None, None, None
-        
+
         print(f"  📊 Terms: {terms} ({len(terms)} term(s))")
-        
         all_data = []
-        
+
         for i, term in enumerate(terms, 1):
             print(f"    [{i}/{len(terms)}] {term}")
-            
             data = self.fetch_trends_for_single_term(term)
-            
             if data is not None:
                 all_data.append(data)
-            
             if i < len(terms):
                 delay = self.get_highly_random_delay(MIN_SECONDS_BETWEEN_TERMS, MAX_SECONDS_BETWEEN_TERMS)
                 print(f"      ⏳ Wait {delay:.5f}s before next term...")
                 time.sleep(delay)
-        
+
         if not all_data:
-            print(f"  ❌ No data retrieved")
+            print("  ❌ No data retrieved")
             return None, None, None
-        
-        print(f"  ✅ Data from {len(all_data)}/{len(terms)} term(s)")
-        
-        # Aggregate data
+
         combined_series = sum(all_data) / len(all_data)
-        avg_interest = combined_series.mean()
-        
-        # Trend direction
-        split_point = len(combined_series) // 3
-        early_avg = combined_series.iloc[:split_point].mean()
-        recent_avg = combined_series.iloc[-split_point:].mean()
-        
+        avg_interest    = combined_series.mean()
+        split           = len(combined_series) // 3
+        early_avg       = combined_series.iloc[:split].mean()
+        recent_avg      = combined_series.iloc[-split:].mean()
+
         if recent_avg > early_avg * 1.2:
             trend_direction = "📈 Rising"
         elif recent_avg < early_avg * 0.8:
             trend_direction = "📉 Declining"
         else:
             trend_direction = "➡️ Stable"
-        
+
         return round(avg_interest, 2), trend_direction, combined_series
-    
+
+    # ── DASHBOARD FORMAT ──────────────────────────────────────────────────────
     def convert_to_dashboard_format(self, product, state, category_group, monthly_series):
-        """
-        Convert Google Trends data to dashboard format.
-        
-        Dashboard expects demand_adjustments with:
-        - product, state, month_index (0-11), new_score (0-4 scale)
-        """
         if monthly_series is None or monthly_series.empty:
             return []
-        
         adjustments = []
-        
-        # Get top 20 months
-        top_months = monthly_series.nlargest(TOP_MONTHS_COUNT)
-        
-        # Convert each top month to dashboard format
-        for date, value in top_months.items():
-            month_name = date.strftime('%B')  # Full month name
+        for date, value in monthly_series.nlargest(TOP_MONTHS_COUNT).items():
+            month_name  = date.strftime('%B')
             month_index = MONTH_TO_INDEX.get(month_name)
-            
             if month_index is not None:
-                # Convert Google Trends value (0-100) to dashboard demand scale (0-4)
-                # 0-20 = 0 (Minimal), 21-40 = 1 (Low), 41-60 = 2 (Moderate), 
-                # 61-80 = 3 (High), 81-100 = 4 (Peak)
-                demand_score = min(4, int(value / 20))
-                
-                adjustment = {
-                    "product": product,
-                    "state": state,
+                adjustments.append({
+                    "product":     product,
+                    "state":       state,
                     "month_index": month_index,
-                    "new_score": demand_score,
+                    "new_score":   min(4, int(value / 20)),
                     "trend_value": round(float(value), 2),
-                    "month_name": month_name
-                }
-                adjustments.append(adjustment)
-        
+                    "month_name":  month_name,
+                })
         return adjustments
-    
+
     def get_remaining_indices(self, total_rows):
-        """Get indices that haven't been scraped yet"""
         scraped = set(self.progress['scraped_indices'])
-        all_indices = set(range(total_rows))
-        remaining = list(all_indices - scraped)
-        return remaining
-    
+        return list(set(range(total_rows)) - scraped)
+
     def initialize_top_months_columns(self, df):
-        """Initialize columns for top 20 months"""
         for i in range(1, TOP_MONTHS_COUNT + 1):
-            month_col = f'Top_{i}_Month'
-            value_col = f'Top_{i}_Value'
-            
-            if month_col not in df.columns:
-                df[month_col] = None
-            if value_col not in df.columns:
-                df[value_col] = None
-        
+            for col in [f'Top_{i}_Month', f'Top_{i}_Value']:
+                if col not in df.columns:
+                    df[col] = None
         print(f"  📅 Initialized columns for top {TOP_MONTHS_COUNT} months")
-    
+
     def store_top_months(self, df, idx, monthly_series):
-        """Store the top N months with highest demand"""
         if monthly_series is None or monthly_series.empty:
             return
-        
         top_months = monthly_series.nlargest(TOP_MONTHS_COUNT)
-        
         for rank, (date, value) in enumerate(top_months.items(), 1):
-            month_col = f'Top_{rank}_Month'
-            value_col = f'Top_{rank}_Value'
-            
-            df.at[idx, month_col] = date.strftime('%Y-%m')
-            df.at[idx, value_col] = round(float(value), 2)
-        
+            df.at[idx, f'Top_{rank}_Month'] = date.strftime('%Y-%m')
+            df.at[idx, f'Top_{rank}_Value'] = round(float(value), 2)
         print(f"  📊 Top month: {top_months.index[0].strftime('%Y-%m')} (value: {top_months.iloc[0]:.2f})")
-    
+
     def export_dashboard_json(self):
-        """Export accumulated data as dashboard-ready JSON"""
         if not self.dashboard_data:
-            print(f"\n⚠️  No dashboard data to export")
+            print("\n⚠️  No dashboard data to export")
             return
-        
         output = {
-            "file_type": "Google Trends Data",
-            "confidence": "high",
-            "summary": f"Google Trends data for {len(set([d['product'] for d in self.dashboard_data]))} products across top {TOP_MONTHS_COUNT} demand months",
-            "products_added": [],
+            "file_type":         "Google Trends Data",
+            "confidence":        "high",
+            "summary":           f"Google Trends data for {len(set(d['product'] for d in self.dashboard_data))} products across top {TOP_MONTHS_COUNT} demand months",
+            "products_added":    [],
             "demand_adjustments": self.dashboard_data,
             "alerts": [
                 f"Data covers 5-year trends with focus on top {TOP_MONTHS_COUNT} months per product",
                 "Demand scores converted from Google Trends (0-100) to dashboard scale (0-4)"
             ],
-            "generated_at": datetime.now().isoformat(),
-            "data_source": "Google Trends API (India)",
+            "generated_at":    datetime.now().isoformat(),
+            "data_source":     "Google Trends API (India)",
             "total_adjustments": len(self.dashboard_data)
         }
-        
         with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
-        
+        unique = len(set(d['product'] for d in self.dashboard_data))
         print(f"\n✅ Dashboard JSON exported: {OUTPUT_JSON}")
-        print(f"   📊 {len(self.dashboard_data)} demand adjustments")
-        print(f"   📦 {len(set([d['product'] for d in self.dashboard_data]))} unique products")
-        print(f"\n💡 Upload this JSON to your dashboard's Data Hub to apply trends!")
-    
+        print(f"   📊 {len(self.dashboard_data)} demand adjustments | 📦 {unique} unique products")
+
+    # ── BATCH RUNNER ──────────────────────────────────────────────────────────
     def run_single_batch(self, df):
-        """Run a single batch of 10 products"""
         remaining = self.get_remaining_indices(len(df))
-        
         if not remaining:
-            failed_count = len(self.progress['failed_attempts'])
-            if failed_count == 0:
-                return False, "ALL_COMPLETE"
-            else:
-                return False, "RETRYING_FAILED"
-        
-        if f'Top_1_Month' not in df.columns:
+            return False, "ALL_COMPLETE" if not self.progress['failed_attempts'] else "RETRYING_FAILED"
+
+        if 'Top_1_Month' not in df.columns:
             self.initialize_top_months_columns(df)
-        
-        # Prioritize failed products
-        failed_indices = [int(idx) for idx in self.progress['failed_attempts'].keys()]
-        failed_to_retry = [idx for idx in failed_indices if idx in remaining]
-        
+
+        failed_indices  = [int(i) for i in self.progress['failed_attempts']]
+        failed_to_retry = [i for i in failed_indices if i in remaining]
+
         if failed_to_retry:
-            num_failed = min(len(failed_to_retry), PRODUCTS_PER_BATCH)
-            batch_indices = failed_to_retry[:num_failed]
-            
-            if num_failed < PRODUCTS_PER_BATCH:
-                new_products = [idx for idx in remaining if idx not in failed_to_retry]
-                random.shuffle(new_products)
-                batch_indices.extend(new_products[:PRODUCTS_PER_BATCH - num_failed])
-            
-            batch_indices = sorted(batch_indices)
-            print(f"📍 {num_failed} retry + {PRODUCTS_PER_BATCH - num_failed} new")
+            n = min(len(failed_to_retry), PRODUCTS_PER_BATCH)
+            batch = failed_to_retry[:n]
+            extra = [i for i in remaining if i not in failed_to_retry]
+            random.shuffle(extra)
+            batch.extend(extra[:PRODUCTS_PER_BATCH - n])
+            batch = sorted(batch)
+            print(f"📍 {n} retry + {PRODUCTS_PER_BATCH - n} new")
         else:
             random.shuffle(remaining)
-            batch_indices = sorted(remaining[:PRODUCTS_PER_BATCH])
-            print(f"🆕 {len(batch_indices)} new products")
-        
-        batch_num = self.progress['total_batches_completed'] + 1
-        print(f"Batch #{batch_num}")
-        
-        start_time = time.time()
+            batch = sorted(remaining[:PRODUCTS_PER_BATCH])
+            print(f"🆕 {len(batch)} new products")
+
+        batch_num     = self.progress['total_batches_completed'] + 1
         success_count = 0
-        
-        for i, idx in enumerate(batch_indices):
-            row = df.iloc[idx]
-            search_term = row.get('Search Term', '')
-            product = row.get('Product', 'Unknown')
-            state = row.get('State', 'All India')
-            category_group = row.get('Category Group', 'general')
-            
+        start_time    = time.time()
+        print(f"Batch #{batch_num}")
+
+        for i, idx in enumerate(batch):
+            row           = df.iloc[idx]
+            search_term   = row.get('Search Term', '')
+            product       = row.get('Product', 'Unknown')
+            state         = row.get('State', 'All India')
+            category_group= row.get('Category Group', 'general')
+
             print(f"\n{'='*70}")
-            print(f"[{i + 1}/{len(batch_indices)}] Row {idx + 1} - {product}")
+            print(f"[{i+1}/{len(batch)}] Row {idx+1} - {product}")
             print(f"🔍 '{search_term}'")
-            
+
             avg_interest, trend_direction, monthly_series = self.fetch_trends(search_term)
-            
-            # Store summary data in Excel
+
             df.at[idx, 'Avg_Interest_5Y'] = avg_interest
             df.at[idx, 'Trend_Direction'] = trend_direction
-            df.at[idx, 'Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            # Store top months in Excel
+            df.at[idx, 'Last_Updated']    = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
             if monthly_series is not None:
                 self.store_top_months(df, idx, monthly_series)
-                
-                # Convert to dashboard format and accumulate
-                dashboard_adjustments = self.convert_to_dashboard_format(
-                    product, state, category_group, monthly_series
-                )
-                self.dashboard_data.extend(dashboard_adjustments)
-                print(f"  📊 Generated {len(dashboard_adjustments)} dashboard adjustments")
-            
+                adjustments = self.convert_to_dashboard_format(product, state, category_group, monthly_series)
+                self.dashboard_data.extend(adjustments)
+                print(f"  📊 Generated {len(adjustments)} dashboard adjustments")
+
             if avg_interest is not None:
                 success_count += 1
-                data_points = len(monthly_series) if monthly_series is not None else 0
-                print(f"  ✅ Interest: {avg_interest} | {trend_direction} | {data_points} months total")
+                print(f"  ✅ Interest: {avg_interest} | {trend_direction}")
                 self.progress['scraped_indices'].append(idx)
-                if str(idx) in self.progress['failed_attempts']:
-                    del self.progress['failed_attempts'][str(idx)]
+                self.progress['failed_attempts'].pop(str(idx), None)
             else:
                 print(f"  ❌ Failed")
-                idx_str = str(idx)
-                if idx_str not in self.progress['failed_attempts']:
-                    self.progress['failed_attempts'][idx_str] = 0
-                self.progress['failed_attempts'][idx_str] += 1
-            
+                self.progress['failed_attempts'].setdefault(str(idx), 0)
+                self.progress['failed_attempts'][str(idx)] += 1
+
+            # Save everything after every single product
             self.save_progress()
             df.to_excel(OUTPUT_EXCEL, index=False, engine='openpyxl')
-            
-            # Export dashboard JSON after each successful product
             if avg_interest is not None:
                 self.export_dashboard_json()
-        
+
         self.progress['total_batches_completed'] += 1
         self.progress['last_batch_time'] = datetime.now().isoformat()
         self.save_progress()
-        
+
         elapsed = time.time() - start_time
+        scraped = len(self.progress['scraped_indices'])
         print(f"\n{'='*70}")
-        print(f"✅ BATCH #{batch_num} COMPLETE")
-        print(f"⏱️  {elapsed/60:.1f} minutes")
-        print(f"✅ Success: {success_count}/{len(batch_indices)}")
-        print(f"📊 Total progress: {len(self.progress['scraped_indices'])}/{len(df)} ({len(self.progress['scraped_indices'])/len(df)*100:.1f}%)")
+        print(f"✅ BATCH #{batch_num} COMPLETE — {success_count}/{len(batch)} success — {elapsed/60:.1f} min")
+        print(f"📊 Total progress: {scraped}/{len(df)} ({scraped/len(df)*100:.1f}%)")
         print(f"{'='*70}")
-        
         return True, None
-    
+
+    # ── MAIN LOOP ─────────────────────────────────────────────────────────────
     def run_continuous(self):
-        """Run batches continuously with 18-23 minute waits"""
         print(f"""
 ╔═══════════════════════════════════════════════════════════════════╗
 ║   Google Trends → Dashboard Automation (Top {TOP_MONTHS_COUNT} Months)        ║
 ╚═══════════════════════════════════════════════════════════════════╝
-
-📂 Input:  {INPUT_EXCEL}
+📂 Input:        {INPUT_EXCEL}
 📂 Output Excel: {OUTPUT_EXCEL}
-📂 Output JSON: {OUTPUT_JSON} (Dashboard-ready!)
-🔢 Batch size: {PRODUCTS_PER_BATCH} products
-⏱️  Term delays: {MIN_SECONDS_BETWEEN_TERMS}-{MAX_SECONDS_BETWEEN_TERMS}s
+📂 Output JSON:  {OUTPUT_JSON}
+🔢 Batch size:   {PRODUCTS_PER_BATCH} products
+⏱️  Term delays:  {MIN_SECONDS_BETWEEN_TERMS}-{MAX_SECONDS_BETWEEN_TERMS}s
 ⏱️  Batch delays: {MIN_MINUTES_BETWEEN_BATCHES}-{MAX_MINUTES_BETWEEN_BATCHES} minutes
-📊 Period: {TIMEFRAME}
-🌍 Geography: India
-📅 Output: Top {TOP_MONTHS_COUNT} months → Dashboard JSON
 """)
-        
-        # Load data
         print("📖 Loading Excel file...")
         try:
             if Path(OUTPUT_EXCEL).exists():
@@ -465,66 +399,54 @@ class DashboardTrendsScraper:
                 print(f"✅ Loaded input file: {len(df)} rows")
                 df['Avg_Interest_5Y'] = None
                 df['Trend_Direction'] = None
-                df['Last_Updated'] = None
+                df['Last_Updated']    = None
         except FileNotFoundError:
             print(f"❌ Could not find '{INPUT_EXCEL}'")
             return
-        
-        # Progress summary
+
+        # KEY: reload all previous results so JSON is always cumulative
+        self.reload_dashboard_data_from_excel(df)
+
         remaining = self.get_remaining_indices(len(df))
-        scraped = len(self.progress['scraped_indices'])
-        failed = len(self.progress['failed_attempts'])
-        
-        print(f"\n📊 Progress:")
-        print(f"   Total: {len(df)}")
-        print(f"   Scraped: {scraped}")
-        if failed > 0:
-            print(f"   Failed: {failed}")
-        print(f"   Remaining: {len(remaining)}")
+        scraped   = len(self.progress['scraped_indices'])
+        failed    = len(self.progress['failed_attempts'])
+
+        print(f"\n📊 Progress: {scraped} scraped | {failed} failed | {len(remaining)} remaining")
         print(f"   Batches completed: {self.progress['total_batches_completed']}")
-        
+
         if not remaining and failed == 0:
             print(f"\n🎉 ALL DONE! {scraped}/{len(df)} products scraped!")
             self.export_dashboard_json()
             return
-        
-        print(f"\n🚀 Starting continuous scraping...\n")
-        
+
+        print(f"\n🚀 Starting scraping...\n")
+
         while True:
             has_more, status = self.run_single_batch(df)
-            
+
             if not has_more:
                 if status == "ALL_COMPLETE":
-                    print(f"\n🎉🎉🎉 ALL PRODUCTS SCRAPED!")
-                    print(f"Total batches: {self.progress['total_batches_completed']}")
-                    print(f"Success rate: {len(self.progress['scraped_indices'])}/{len(df)}")
+                    print(f"\n🎉 ALL PRODUCTS SCRAPED! {scraped}/{len(df)}")
                     self.export_dashboard_json()
-                    break
-                elif status == "RETRYING_FAILED":
-                    print(f"\n⚠️  No new products, but {len(self.progress['failed_attempts'])} failed")
-            
-            remaining_after = len(df) - len(self.progress['scraped_indices'])
-            if remaining_after == 0 and len(self.progress['failed_attempts']) == 0:
+                break
+
+            if len(df) - len(self.progress['scraped_indices']) == 0 and not self.progress['failed_attempts']:
                 self.export_dashboard_json()
                 break
-            
-            # Wait between batches
-            wait_minutes = random.randint(MIN_MINUTES_BETWEEN_BATCHES, MAX_MINUTES_BETWEEN_BATCHES)
-            wait_seconds = round(random.uniform(0, 59.99999), 5)
-            total_wait_seconds = wait_minutes * 60 + wait_seconds
-            
-            next_time = datetime.now() + timedelta(seconds=total_wait_seconds)
-            
-            print(f"\n⏳ WAITING {wait_minutes} min {wait_seconds:.5f} sec until next batch")
-            print(f"   Next batch at: {next_time.strftime('%I:%M:%S %p')}")
-            print(f"   Remaining: {remaining_after} products")
-            print(f"\n{'='*70}\n")
-            
-            time.sleep(total_wait_seconds)
-        
-        print(f"\n💾 Excel saved: {OUTPUT_EXCEL}")
-        print(f"💾 Dashboard JSON saved: {OUTPUT_JSON}")
-        print(f"\n📤 NEXT STEP: Upload '{OUTPUT_JSON}' to your dashboard's Data Hub!")
+
+            wait_min = random.randint(MIN_MINUTES_BETWEEN_BATCHES, MAX_MINUTES_BETWEEN_BATCHES)
+            wait_sec = round(random.uniform(0, 59.99999), 5)
+            total    = wait_min * 60 + wait_sec
+            next_t   = datetime.now() + timedelta(seconds=total)
+            remaining_now = len(df) - len(self.progress['scraped_indices'])
+
+            print(f"\n⏳ WAITING {wait_min} min {wait_sec:.5f} sec until next batch")
+            print(f"   Next batch at: {next_t.strftime('%I:%M:%S %p')}")
+            print(f"   Remaining: {remaining_now} products\n{'='*70}\n")
+            time.sleep(total)
+
+        print(f"\n💾 Excel: {OUTPUT_EXCEL}")
+        print(f"💾 JSON:  {OUTPUT_JSON}")
 
 
 if __name__ == "__main__":
@@ -532,9 +454,8 @@ if __name__ == "__main__":
         scraper = DashboardTrendsScraper()
         scraper.run_continuous()
     except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted! Progress saved. Run again to resume.")
-        print(f"💾 Partial dashboard JSON available: {OUTPUT_JSON}")
+        print("\n⚠️  Interrupted! Progress saved. Run again to resume.")
     except Exception as e:
-        print(f"\n\n❌ Error: {str(e)}")
+        print(f"\n❌ Error: {str(e)}")
         import traceback
         traceback.print_exc()
