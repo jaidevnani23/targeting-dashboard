@@ -1,0 +1,5 @@
+json{
+  "rewrites": [
+    { "source": "/", "destination": "/dashboard/logistics_dashboard.html" }
+  ]
+}
