@@ -2,19 +2,20 @@ name: Update Google Trends Data
 
 on:
   schedule:
-    - cron: '0 6 1 * *'   # Runs every day at 6 AM UTC (11:30 AM IST)
-  workflow_dispatch:        # Also lets you trigger it manually from GitHub UI
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
 
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
+    timeout-minutes: 1200
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -25,14 +26,45 @@ jobs:
         env:
           BRIGHTDATA_USERNAME: ${{ secrets.BRIGHTDATA_USERNAME }}
           BRIGHTDATA_PASSWORD: ${{ secrets.BRIGHTDATA_PASSWORD }}
-          BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
-          BRIGHTDATA_PORT: ${{ secrets.BRIGHTDATA_PORT }}
+          BRIGHTDATA_HOST:     ${{ secrets.BRIGHTDATA_HOST }}
+          BRIGHTDATA_PORT:     ${{ secrets.BRIGHTDATA_PORT }}
         run: python google_trends_scraper.py
 
-      - name: Commit updated JSON to repo
+      - name: Convert Excel to dashboard JSON
+        run: |
+          python3 - << 'EOF'
+          import pandas as pd, json
+          from datetime import datetime
+
+          df = pd.read_excel('data/Demand_Excel_With_Trends.xlsx').fillna('')
+          if 'NIC Code' in df.columns:
+              df['NIC Code'] = df['NIC Code'].apply(lambda x: str(int(float(x))) if x not in ('', None) else '')
+
+          rows = []
+          for _, row in df.iterrows():
+              if not row.get('Trend_Direction'): continue
+              record = {k: str(row[k]) if k == 'Last_Updated' else row[k]
+                        for k in ['State','Product','NIC Code','Category','Search Term','Avg_Interest_5Y','Trend_Direction','Last_Updated']}
+              seen, rank = set(), 1
+              for i in range(1, 21):
+                  m = str(row.get(f'Top_{i}_Month', '')).strip()
+                  if not m: continue
+                  try: name = datetime.strptime(m, '%Y-%m').strftime('%B')
+                  except: name = m
+                  if name not in seen:
+                      seen.add(name)
+                      record[f'Top_{rank}_Month'] = name
+                      rank += 1
+              rows.append(record)
+
+          json.dump(rows, open('data/dashboard_trends_data.json','w'), indent=2, ensure_ascii=False)
+          print(f"Exported {len(rows)} rows")
+          EOF
+
+      - name: Commit updated files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/dashboard_trends_data.json
+          git add data/dashboard_trends_data.json data/Demand_Excel_With_Trends.xlsx || true
           git diff --staged --quiet || git commit -m "Auto-update trends data $(date +'%Y-%m-%d')"
-          git push
+          git push || true
