@@ -240,7 +240,7 @@ async function autoLoadTrendsFromRepo() {
     showLoading('Fetching latest trends data…');
     const res  = await fetch(JSON_URL);
     const json = await res.json();
-    demandData = json;
+    demandData = json.demand_adjustments || json.rows || (Array.isArray(json) ? json : []);;
     applyFilters();
     updateLastUpdated();
     hideLoading();
