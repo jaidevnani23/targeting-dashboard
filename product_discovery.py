@@ -48,6 +48,12 @@ OUTPUT_FILE    = "data/new_products_suggestions.json"
 MAX_PER_CATEGORY = 10
 MIN_FLOOR_STATES = 3   # guarantee at least this many states per product
 
+# Randomized delay ranges (in seconds)
+MIN_SCRAPE_DELAY   = 4.5   # minimum delay between individual scrapes
+MAX_SCRAPE_DELAY   = 8.7   # maximum delay between individual scrapes
+MIN_CATEGORY_DELAY = 10.0  # minimum delay between categories
+MAX_CATEGORY_DELAY = 15.5  # maximum delay between categories
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-7s  %(message)s",
                     datefmt="%H:%M:%S")
@@ -65,6 +71,20 @@ def get_headers():
         "Accept-Language": "en-IN,en;q=0.9",
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
+
+
+def random_scrape_delay():
+    """Sleep for a randomized duration between individual scrapes"""
+    delay = random.uniform(MIN_SCRAPE_DELAY, MAX_SCRAPE_DELAY)
+    log.info(f"💤 Waiting {delay:.2f}s before next scrape...")
+    time.sleep(delay)
+
+
+def random_category_delay():
+    """Sleep for a randomized duration between categories"""
+    delay = random.uniform(MIN_CATEGORY_DELAY, MAX_CATEGORY_DELAY)
+    log.info(f"💤 Category complete. Waiting {delay:.2f}s before next category...")
+    time.sleep(delay)
 
 
 # ── LOAD REFERENCE DATA ───────────────────────────────────────────────────────
@@ -272,19 +292,23 @@ def scrape_flipkart(search_term: str) -> list:
 def discover_new_products(cat_data: dict, existing: set,
                           nic_state_counts: dict, cat_lookup: dict) -> list:
     suggestions = []
+    total_categories = len(cat_data)
+    category_num = 0
 
     for category, data in cat_data.items():
+        category_num += 1
         nic_codes = data["nic_codes"]
         keywords  = list(data["keywords"])[:3]
-        log.info(f"\nSearching: {category} ({len(nic_codes)} NIC codes)")
+        log.info(f"\n[{category_num}/{total_categories}] Searching: {category} ({len(nic_codes)} NIC codes)")
         found = []
 
         for keyword in keywords:
             log.info(f"  '{keyword}'")
             amazon_products   = scrape_amazon(keyword)
-            time.sleep(random.uniform(1.5, 3.0))
+            random_scrape_delay()  # Randomized delay after Amazon scrape
+            
             flipkart_products = scrape_flipkart(keyword)
-            time.sleep(random.uniform(1.5, 3.0))
+            random_scrape_delay()  # Randomized delay after Flipkart scrape
 
             for product in amazon_products + flipkart_products:
                 p_lower = product.lower().strip()
@@ -312,6 +336,10 @@ def discover_new_products(cat_data: dict, existing: set,
 
         suggestions.extend(found[:MAX_PER_CATEGORY])
         log.info(f"  Found {len(found)} new products for {category}")
+        
+        # Add delay between categories (except after the last one)
+        if category_num < total_categories:
+            random_category_delay()
 
     return suggestions
 
