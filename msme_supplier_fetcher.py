@@ -21,6 +21,7 @@ import pandas as pd
 import os
 import json
 import time
+import random
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,7 +43,8 @@ OUTPUT_DIR     = "data/suppliers"
 BATCH_SIZE       = 1000
 TIMEOUT_SEC      = 120      # increased from 60 to handle slow API responses
 MAX_RETRIES      = 5
-PAGE_DELAY_SEC   = 0.25
+MIN_BATCH_DELAY  = 6.77585  # minimum seconds between batches
+MAX_BATCH_DELAY  = 9.84774  # maximum seconds between batches
 STATE_DELAY_SEC  = 2        # increased from 0.5 to give API breathing room
 MAX_PAGE_WORKERS = 1        # sequential page fetching — more reliable on gov API
 
@@ -86,6 +88,14 @@ def load_category_mapping():
     )
     log.info(f"Loaded {len(mapping)} NIC→Category mappings from {DEMAND_FILE}")
     return mapping
+
+
+# ── RANDOM DELAY ──────────────────────────────────────────────────────────────
+def random_batch_delay():
+    """Sleep for a highly randomized duration between batches to avoid rate limiting"""
+    delay = random.uniform(MIN_BATCH_DELAY, MAX_BATCH_DELAY)
+    log.info(f"💤 Waiting {delay:.5f}s before next batch...")
+    time.sleep(delay)
 
 
 # ── HTTP SESSION ──────────────────────────────────────────────────────────────
@@ -136,12 +146,18 @@ def fetch_all_for_state(state: str) -> pd.DataFrame:
     log.info(f"[{state}] {total:,} records across {1 + len(offsets)} pages")
 
     if offsets:
-        def _fetch(off):
-            time.sleep(PAGE_DELAY_SEC)
-            return fetch_page(state, off).get("records", [])
+        def _fetch(off, idx, total_pages):
+            # Add random delay before each batch (except the first one which already happened)
+            if idx > 0:
+                random_batch_delay()
+            
+            result = fetch_page(state, off).get("records", [])
+            log.info(f"[{state}] Fetched batch {idx + 2}/{total_pages + 1} (offset {off})")
+            return result
 
         with ThreadPoolExecutor(max_workers=MAX_PAGE_WORKERS) as pool:
-            futures = {pool.submit(_fetch, off): off for off in offsets}
+            futures = {pool.submit(_fetch, off, idx, len(offsets)): off 
+                      for idx, off in enumerate(offsets)}
             for fut in as_completed(futures):
                 all_records.extend(fut.result())
 
