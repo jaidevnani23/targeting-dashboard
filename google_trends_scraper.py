@@ -161,8 +161,7 @@ class DashboardTrendsScraper:
             reloaded += 1
 
         print(f"✅ Reloaded {reloaded} products ({len(self.dashboard_data)} demand adjustments) from previous run")
-        # Immediately re-export so the JSON is up to date even if nothing new is scraped
-        self.export_dashboard_json()
+        # export is called from run_continuous after reload returns (with df)
 
     # ── FETCH ─────────────────────────────────────────────────────────────────
     def get_highly_random_delay(self, min_s, max_s):
@@ -271,29 +270,36 @@ class DashboardTrendsScraper:
             df.at[idx, f'Top_{rank}_Value'] = round(float(value), 2)
         print(f"  📊 Top month: {top_months.index[0].strftime('%Y-%m')} (value: {top_months.iloc[0]:.2f})")
 
-    def export_dashboard_json(self):
-        if not self.dashboard_data:
-            print("\n⚠️  No dashboard data to export")
+    def export_dashboard_json(self, df=None):
+        """
+        Exports dashboard_trends_data.json as a flat array of rows —
+        one row per State+Product, matching the Excel column structure exactly.
+        This is the format the dashboard reads directly.
+        """
+        if df is None:
+            print("\n⚠️  export_dashboard_json called without df — skipping")
             return
-        output = {
-            "file_type":         "Google Trends Data",
-            "confidence":        "high",
-            "summary":           f"Google Trends data for {len(set(d['product'] for d in self.dashboard_data))} products across top {TOP_MONTHS_COUNT} demand months",
-            "products_added":    [],
-            "demand_adjustments": self.dashboard_data,
-            "alerts": [
-                f"Data covers 5-year trends with focus on top {TOP_MONTHS_COUNT} months per product",
-                "Demand scores converted from Google Trends (0-100) to dashboard scale (0-4)"
-            ],
-            "generated_at":    datetime.now().isoformat(),
-            "data_source":     "Google Trends API (India)",
-            "total_adjustments": len(self.dashboard_data)
-        }
+
+        scraped_df = df[df['Trend_Direction'].notna() & (df['Trend_Direction'] != '')].copy()
+        if scraped_df.empty:
+            print("\n⚠️  No scraped rows to export yet")
+            return
+
+        scraped_df = scraped_df.fillna('')
+
+        if 'NIC Code' in scraped_df.columns:
+            scraped_df['NIC Code'] = scraped_df['NIC Code'].apply(
+                lambda x: str(int(float(x))) if x not in ('', None) else ''
+            )
+
+        rows = scraped_df.to_dict(orient='records')
+
         with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
-        unique = len(set(d['product'] for d in self.dashboard_data))
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+
+        unique = scraped_df['Product'].nunique() if 'Product' in scraped_df.columns else len(rows)
         print(f"\n✅ Dashboard JSON exported: {OUTPUT_JSON}")
-        print(f"   📊 {len(self.dashboard_data)} demand adjustments | 📦 {unique} unique products")
+        print(f"   📊 {len(rows)} rows | 📦 {unique} unique products")
 
     # ── BATCH RUNNER ──────────────────────────────────────────────────────────
     def run_single_batch(self, df):
@@ -362,7 +368,7 @@ class DashboardTrendsScraper:
             self.save_progress()
             df.to_excel(OUTPUT_EXCEL, index=False, engine='openpyxl')
             if avg_interest is not None:
-                self.export_dashboard_json()
+                self.export_dashboard_json(df)
 
         self.progress['total_batches_completed'] += 1
         self.progress['last_batch_time'] = datetime.now().isoformat()
@@ -406,6 +412,7 @@ class DashboardTrendsScraper:
 
         # KEY: reload all previous results so JSON is always cumulative
         self.reload_dashboard_data_from_excel(df)
+        self.export_dashboard_json(df)  # export immediately with reloaded data
 
         remaining = self.get_remaining_indices(len(df))
         scraped   = len(self.progress['scraped_indices'])
@@ -416,7 +423,7 @@ class DashboardTrendsScraper:
 
         if not remaining and failed == 0:
             print(f"\n🎉 ALL DONE! {scraped}/{len(df)} products scraped!")
-            self.export_dashboard_json()
+            self.export_dashboard_json(df)
             return
 
         print(f"\n🚀 Starting scraping...\n")
@@ -427,11 +434,11 @@ class DashboardTrendsScraper:
             if not has_more:
                 if status == "ALL_COMPLETE":
                     print(f"\n🎉 ALL PRODUCTS SCRAPED! {scraped}/{len(df)}")
-                    self.export_dashboard_json()
+                    self.export_dashboard_json(df)
                 break
 
             if len(df) - len(self.progress['scraped_indices']) == 0 and not self.progress['failed_attempts']:
-                self.export_dashboard_json()
+                self.export_dashboard_json(df)
                 break
 
             wait_min = random.randint(MIN_MINUTES_BETWEEN_BATCHES, MAX_MINUTES_BETWEEN_BATCHES)
