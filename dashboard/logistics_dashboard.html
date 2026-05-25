@@ -157,6 +157,10 @@ tbody tr:hover td { background: #EEF3FB !important; }
       <button class="side-btn active" id="btn-demand" onclick="switchSide('demand')">📊 Demand</button>
       <button class="side-btn" id="btn-supply" onclick="switchSide('supply')">🏭 Supply</button>
     </div>
+    <button class="refresh-btn" id="download-btn" onclick="downloadFiltered()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download
+    </button>
     <button class="refresh-btn" id="refresh-btn" onclick="refreshData()">
       <svg id="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Refresh
@@ -338,6 +342,36 @@ function enrichSupplyWithCategory(row) {
   return row;
 }
 
+// ── DOWNLOAD FILTERED DATA ───────────────────────────────────────────────────
+function downloadFiltered() {
+  if (filteredData.length === 0) {
+    alert('No data to download. Please apply filters or upload data first.');
+    return;
+  }
+
+  try {
+    showLoading('Preparing download…');
+    
+    // Create workbook and worksheet from filtered data
+    const ws = XLSX.utils.json_to_sheet(filteredData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, currentSide === 'demand' ? 'Demand Data' : 'Supply Data');
+    
+    // Generate filename with timestamp and current side
+    const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const filename = `logistics_${currentSide}_${timestamp}.xlsb`;
+    
+    // Write as XLSB format
+    XLSX.writeFile(wb, filename, { bookType: 'xlsb' });
+    
+    hideLoading();
+  } catch (err) {
+    console.error('Download error:', err);
+    alert(`Error creating download: ${err.message}`);
+    hideLoading();
+  }
+}
+
 // ── SIDE SWITCH ───────────────────────────────────────────────────────────────
 function switchSide(side) {
   currentSide = side;
@@ -445,9 +479,26 @@ function fillSelect(id, opts) {
 // ── PEAK MONTHS HELPER ────────────────────────────────────────────────────────
 function getPeakMonths(row) {
   const months = [];
+  const seen = new Set();
+  
   for (let i = 1; i <= 20; i++) {
     const m = row[`Top_${i}_Month`];
-    if (m) months.push(m);
+    if (m) {
+      // Extract month name from yyyy-mm format (e.g., "2024-03" -> "March")
+      let monthName = m;
+      if (m.match(/^\d{4}-\d{2}$/)) {
+        const monthNum = parseInt(m.split('-')[1], 10);
+        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                          'July', 'August', 'September', 'October', 'November', 'December'];
+        monthName = monthNames[monthNum - 1] || m;
+      }
+      
+      // Only add if not already seen (deduplicate)
+      if (!seen.has(monthName)) {
+        seen.add(monthName);
+        months.push(monthName);
+      }
+    }
   }
   return months;
 }
