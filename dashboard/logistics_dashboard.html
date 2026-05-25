@@ -497,6 +497,12 @@ function renderTable() {
       if (c.trend) {
         const cls = val.includes('Rising') ? 'tag-rising' : val.includes('Declining') ? 'tag-declining' : 'tag-stable';
         val = `<span class="tag ${cls}">${val}</span>`;
+      } else if (c.key === 'NIC Code' || c.key === 'NIC_Code') {
+        // Format NIC codes as 5-digit numbers with leading zeros
+        val = String(val).padStart(5, '0');
+      } else if (c.key === 'Pincode') {
+        // Format pincodes as 6-digit numbers with leading zeros
+        val = String(val).padStart(6, '0');
       } else if (typeof val === 'number') {
         val = val.toLocaleString();
       }
