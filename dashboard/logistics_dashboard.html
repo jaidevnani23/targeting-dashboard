@@ -412,7 +412,7 @@ function buildFilterOptions() {
     const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
     const districts  = [...new Set(all.map(r => r['District']).filter(Boolean))].sort();
     const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
-    const niccodes   = [...new Set(all.map(r => String(r['NIC_Code']).filter(Boolean)))].sort();
+    const niccodes   = [...new Set(all.map(r => r['NIC_Code']).filter(Boolean).map(v => String(v)))].sort();
 
     fillSelect('s-state', states);
     fillSelect('s-district', districts);
