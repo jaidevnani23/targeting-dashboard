@@ -241,7 +241,20 @@ async function autoLoadTrendsFromRepo() {
     const res  = await fetch(JSON_URL);
     const json = await res.json();
     demandData = Array.isArray(json) ? json : (json.rows || json.demand_adjustments || []);
-    applyFilters();
+// Build NIC → Category map for supply side enrichment
+trendsMap = {};
+demandData.forEach(row => {
+  const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
+  const cat = row['Category'];
+  if (nic && cat) trendsMap[String(nic)] = cat;
+});
+
+// Re-enrich supply data if already loaded
+if (supplyData.length > 0) {
+  supplyData = supplyData.map(row => enrichSupplyWithCategory(row));
+}
+
+applyFilters();
     updateLastUpdated();
     hideLoading();
   } catch (e) {
