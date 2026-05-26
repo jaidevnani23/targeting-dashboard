@@ -191,7 +191,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
     </div>
     <div class="upload-strip">
       <label class="upload-btn">
-        <input type="file" accept=".xlsx,.xls,.csv" style="display:none" id="trends-upload" onchange="handleUpload('trends')">
+        <input type="file" accept=".xlsx,.xls,.csv,.json" style="display:none" id="trends-upload" onchange="handleUpload('trends')">
         📤 Upload Demand/Trends
       </label>
       <label class="upload-btn">
@@ -236,29 +236,100 @@ tbody tr:hover td { background: #EEF3FB !important; }
 </div>
 
 <script>
+// ── CONSTANTS ─────────────────────────────────────────────────────────────────
+const MONTH_NAMES   = ['January','February','March','April','May','June',
+                       'July','August','September','October','November','December'];
+const PEAK_MIN_OCCURRENCES = 4; // a month must appear in ≥ this many of a product's own 20 Top_N slots
+const TOP_N         = 20;      // number of Top_N_Month columns to inspect
+
 // ── STATE ─────────────────────────────────────────────────────────────────────
-// Auto-load trends JSON from the repo on page open
+let demandData      = [];
+let supplyData      = [];
+let trendsMap       = {};  // NIC code → Category
+let filteredData    = [];
+let currentSide     = 'demand';
+let currentPage     = 1;
+let sortCol         = null;
+let sortDir         = 1;
+const PAGE_SIZE     = 50;
+
+// ── PEAK MONTHS LOGIC ─────────────────────────────────────────────────────────
+
+/**
+ * Normalise a Top_N_Month value to a full month name.
+ * Accepts 'YYYY-MM' (e.g. '2024-03') or a plain name (e.g. 'March').
+ * Returns null if the value is empty or unrecognisable.
+ */
+function normaliseMonthName(val) {
+  if (!val) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}$/.test(s)) {
+    const idx = parseInt(s.split('-')[1], 10) - 1;
+    return MONTH_NAMES[idx] || null;
+  }
+  const cap = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  if (MONTH_NAMES.includes(cap)) return cap;
+  const full = MONTH_NAMES.find(m => m.toLowerCase().startsWith(s.toLowerCase().slice(0, 3)));
+  return full || null;
+}
+
+/**
+ * Return the peak months for a single product row, sorted by calendar order.
+ *
+ * A month qualifies if it appears in ≥ PEAK_MIN_OCCURRENCES of this row's own
+ * Top_1_Month … Top_20_Month slots. Because each slot is a YYYY-MM date, the
+ * same calendar month can appear across multiple years (2022-07, 2023-07 …).
+ * We count those raw occurrences — repetition across years is exactly what
+ * signals a seasonal peak for that specific product.
+ *
+ * If the scraper already wrote a Peak_Months column, we use that directly.
+ */
+function getPeakMonths(row) {
+  // Fast path: scraper pre-computed column present
+  const precomputed = row['Peak_Months'];
+  if (precomputed && String(precomputed).trim()) {
+    return String(precomputed)
+      .split(',')
+      .map(p => normaliseMonthName(p.trim()))
+      .filter(Boolean)
+      .filter((m, i, a) => a.indexOf(m) === i)
+      .sort((a, b) => MONTH_NAMES.indexOf(a) - MONTH_NAMES.indexOf(b));
+  }
+
+  // Count raw occurrences of each calendar month across all 20 slots
+  const monthCount = {};
+  for (let i = 1; i <= TOP_N; i++) {
+    const m = normaliseMonthName(row[`Top_${i}_Month`]);
+    if (m) monthCount[m] = (monthCount[m] || 0) + 1;
+  }
+
+  // Only months that recur ≥ PEAK_MIN_OCCURRENCES times, in calendar order
+  return MONTH_NAMES.filter(m => (monthCount[m] || 0) >= PEAK_MIN_OCCURRENCES);
+}
+
+// ── AUTO-LOAD FROM REPO ───────────────────────────────────────────────────────
 async function autoLoadTrendsFromRepo() {
   const JSON_URL = 'https://raw.githubusercontent.com/jaidevnani23/targeting-dashboard/main/data/dashboard_trends_data.json';
   try {
     showLoading('Fetching latest trends data…');
     const res  = await fetch(JSON_URL);
     const json = await res.json();
-    demandData = Array.isArray(json) ? json : (json.rows || json.demand_adjustments || []);
-// Build NIC → Category map for supply side enrichment
-trendsMap = {};
-demandData.forEach(row => {
-  const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
-  const cat = row['Category'];
-  if (nic && cat) trendsMap[String(nic)] = cat;
-});
+    setDemandData(Array.isArray(json) ? json : (json.rows || json.demand_adjustments || []));
 
-// Re-enrich supply data if already loaded
-if (supplyData.length > 0) {
-  supplyData = supplyData.map(row => enrichSupplyWithCategory(row));
-}
+    // Build NIC → Category map for supply side enrichment
+    trendsMap = {};
+    demandData.forEach(row => {
+      const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
+      const cat = row['Category'];
+      if (nic && cat) trendsMap[String(nic)] = cat;
+    });
 
-applyFilters();
+    if (supplyData.length > 0) {
+      supplyData = supplyData.map(enrichSupplyWithCategory);
+    }
+
+    applyFilters();
     updateLastUpdated();
     hideLoading();
   } catch (e) {
@@ -267,20 +338,12 @@ applyFilters();
   }
 }
 
-// Call it on page load
 window.addEventListener('DOMContentLoaded', autoLoadTrendsFromRepo);
-let demandData   = [];
-let supplyData   = [];
-let trendsMap    = {}; // NIC code -> Category mapping from trends file
-let filteredData = [];
-let currentSide  = 'demand';
-let currentPage  = 1;
-let sortCol      = null;
-let sortDir      = 1;
-const PAGE_SIZE  = 50;
 
-// ── INIT ──────────────────────────────────────────────────────────────────────
-// (initialization moved to dark mode handler below)
+// ── DEMAND DATA SETTER ────────────────────────────────────────────────────────
+function setDemandData(rows) {
+  demandData = rows;
+}
 
 // ── FILE UPLOAD ───────────────────────────────────────────────────────────────
 function handleUpload(type) {
@@ -289,6 +352,39 @@ function handleUpload(type) {
   if (!file) return;
 
   showLoading(`Reading ${type} file…`);
+
+  // JSON files (demand/trends side only)
+  if (file.name.endsWith('.json')) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const json = JSON.parse(e.target.result);
+        const rows = Array.isArray(json) ? json : (json.rows || json.demand_adjustments || []);
+        setDemandData(rows);
+
+        trendsMap = {};
+        demandData.forEach(row => {
+          const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
+          const cat = row['Category'];
+          if (nic && cat) trendsMap[String(nic)] = cat;
+        });
+        if (supplyData.length > 0) supplyData = supplyData.map(enrichSupplyWithCategory);
+
+        document.getElementById('trends-file-badge').style.display = 'flex';
+        applyFilters();
+        updateLastUpdated();
+        hideLoading();
+      } catch (err) {
+        console.error(err);
+        alert(`Error reading JSON file: ${err.message}`);
+        hideLoading();
+      }
+    };
+    reader.readAsText(file);
+    return;
+  }
+
+  // Excel / CSV files
   const reader = new FileReader();
   reader.onload = e => {
     try {
@@ -297,31 +393,24 @@ function handleUpload(type) {
       const json = XLSX.utils.sheet_to_json(ws);
 
       if (type === 'trends') {
-        // Use trends file as demand data
-        demandData = json.demand_adjustments || json;
-        
-        // Also build NIC code -> Category mapping for supply side
+        setDemandData(json);
+
         trendsMap = {};
-        json.forEach(row => {
+        demandData.forEach(row => {
           const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
           const cat = row['Category'];
           if (nic && cat) trendsMap[String(nic)] = cat;
         });
-        
+        if (supplyData.length > 0) supplyData = supplyData.map(enrichSupplyWithCategory);
+
         document.getElementById('trends-file-badge').style.display = 'flex';
-        
-        // Re-enrich supply data with new categories if supply data exists
-        if (supplyData.length > 0) {
-          supplyData = supplyData.map(row => enrichSupplyWithCategory(row));
-        }
-        
         applyFilters();
       } else if (type === 'supply') {
-        supplyData = json.map(row => enrichSupplyWithCategory(row));
+        supplyData = json.map(enrichSupplyWithCategory);
         document.getElementById('supply-file-badge').style.display = 'flex';
         if (currentSide === 'supply') applyFilters();
       }
-      
+
       updateLastUpdated();
       hideLoading();
     } catch (err) {
@@ -333,7 +422,7 @@ function handleUpload(type) {
   reader.readAsBinaryString(file);
 }
 
-// Enrich supply row with Category from trendsMap based on NIC_Code
+// ── SUPPLY ENRICHMENT ─────────────────────────────────────────────────────────
 function enrichSupplyWithCategory(row) {
   const nicCode = row['NIC_Code'] || row['NIC Code'] || row['NICCode'];
   if (nicCode && trendsMap[String(nicCode)]) {
@@ -342,28 +431,19 @@ function enrichSupplyWithCategory(row) {
   return row;
 }
 
-// ── DOWNLOAD FILTERED DATA ───────────────────────────────────────────────────
+// ── DOWNLOAD ──────────────────────────────────────────────────────────────────
 function downloadFiltered() {
   if (filteredData.length === 0) {
     alert('No data to download. Please apply filters or upload data first.');
     return;
   }
-
   try {
     showLoading('Preparing download…');
-    
-    // Create workbook and worksheet from filtered data
-    const ws = XLSX.utils.json_to_sheet(filteredData);
-    const wb = XLSX.utils.book_new();
+    const ws  = XLSX.utils.json_to_sheet(filteredData);
+    const wb  = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, currentSide === 'demand' ? 'Demand Data' : 'Supply Data');
-    
-    // Generate filename with timestamp and current side
-    const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const filename = `logistics_${currentSide}_${timestamp}.xlsb`;
-    
-    // Write as XLSB format
-    XLSX.writeFile(wb, filename, { bookType: 'xlsb' });
-    
+    const ts  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    XLSX.writeFile(wb, `logistics_${currentSide}_${ts}.xlsb`, { bookType: 'xlsb' });
     hideLoading();
   } catch (err) {
     console.error('Download error:', err);
@@ -377,12 +457,10 @@ function switchSide(side) {
   currentSide = side;
   currentPage = 1;
   sortCol = null; sortDir = 1;
-  
   document.getElementById('btn-demand').classList.toggle('active', side === 'demand');
   document.getElementById('btn-supply').classList.toggle('active', side === 'supply');
   document.getElementById('demand-filters').style.display = side === 'demand' ? 'flex' : 'none';
   document.getElementById('supply-filters').style.display = side === 'supply' ? 'flex' : 'none';
-  
   applyFilters();
 }
 
@@ -398,14 +476,14 @@ function applyFilters() {
     const trend    = document.getElementById('d-trend').value;
     const peak     = document.getElementById('d-peakmonth').value;
 
-    if (search)   data = data.filter(r => 
+    if (search)   data = data.filter(r =>
       (r['Product']||'').toLowerCase().includes(search) ||
       (r['State']||'').toLowerCase().includes(search) ||
-      (r['Category']||'').toLowerCase().includes(search)
-    );
+      (r['Category']||'').toLowerCase().includes(search));
     if (state)    data = data.filter(r => r['State'] === state);
     if (category) data = data.filter(r => r['Category'] === category);
     if (trend)    data = data.filter(r => (r['Trend_Direction']||'').includes(trend));
+    // Peak month filter: row must have this month as one of its qualifying peaks
     if (peak)     data = data.filter(r => getPeakMonths(r).includes(peak));
   } else {
     const search   = document.getElementById('s-search').value.toLowerCase();
@@ -417,19 +495,16 @@ function applyFilters() {
     if (search)   data = data.filter(r =>
       (r['EnterpriseName']||'').toLowerCase().includes(search) ||
       String(r['NIC_Code']||'').includes(search) ||
-      (r['NIC_Description']||'').toLowerCase().includes(search)
-    );
+      (r['NIC_Description']||'').toLowerCase().includes(search));
     if (state)    data = data.filter(r => r['State'] === state);
     if (district) data = data.filter(r => r['District'] === district);
     if (category) data = data.filter(r => r['Category'] === category);
     if (niccode)  data = data.filter(r => String(r['NIC_Code']) === niccode);
   }
 
-  // Sort
   if (sortCol) {
     data.sort((a, b) => {
-      let aVal = a[sortCol] ?? '';
-      let bVal = b[sortCol] ?? '';
+      let aVal = a[sortCol] ?? '', bVal = b[sortCol] ?? '';
       if (typeof aVal === 'string') aVal = aVal.toLowerCase();
       if (typeof bVal === 'string') bVal = bVal.toLowerCase();
       return (aVal < bVal ? -1 : aVal > bVal ? 1 : 0) * sortDir;
@@ -443,14 +518,16 @@ function applyFilters() {
   buildFilterOptions();
 }
 
-// ── BUILD FILTER DROPDOWNS ────────────────────────────────────────────────────
+// ── FILTER DROPDOWNS ──────────────────────────────────────────────────────────
 function buildFilterOptions() {
   const all = currentSide === 'demand' ? demandData : supplyData;
 
   if (currentSide === 'demand') {
     const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
     const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
-    const peaks      = [...new Set(all.flatMap(r => getPeakMonths(r)))].sort();
+    // Peak month dropdown: union of all qualifying peak months across all rows
+    const peakSet = new Set(all.flatMap(r => getPeakMonths(r)));
+    const peaks   = MONTH_NAMES.filter(m => peakSet.has(m));
 
     fillSelect('d-state', states);
     fillSelect('d-category', categories);
@@ -469,59 +546,33 @@ function buildFilterOptions() {
 }
 
 function fillSelect(id, opts) {
-  const sel = document.getElementById(id);
-  const curr = sel.value;
+  const sel   = document.getElementById(id);
+  const curr  = sel.value;
   const first = sel.options[0].text;
-  sel.innerHTML = `<option value="">${first}</option>` + opts.map(v => `<option value="${v}">${v}</option>`).join('');
+  sel.innerHTML = `<option value="">${first}</option>` +
+    opts.map(v => `<option value="${v}">${v}</option>`).join('');
   if (opts.includes(curr)) sel.value = curr;
-}
-
-// ── PEAK MONTHS HELPER ────────────────────────────────────────────────────────
-function getPeakMonths(row) {
-  const months = [];
-  const seen = new Set();
-  
-  for (let i = 1; i <= 20; i++) {
-    const m = row[`Top_${i}_Month`];
-    if (m) {
-      // Extract month name from yyyy-mm format (e.g., "2024-03" -> "March")
-      let monthName = m;
-      if (m.match(/^\d{4}-\d{2}$/)) {
-        const monthNum = parseInt(m.split('-')[1], 10);
-        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
-                          'July', 'August', 'September', 'October', 'November', 'December'];
-        monthName = monthNames[monthNum - 1] || m;
-      }
-      
-      // Only add if not already seen (deduplicate)
-      if (!seen.has(monthName)) {
-        seen.add(monthName);
-        months.push(monthName);
-      }
-    }
-  }
-  return months;
 }
 
 // ── COLUMN DEFINITIONS ────────────────────────────────────────────────────────
 const DEMAND_COLS = [
-  { key: 'State',            label: 'State' },
-  { key: 'Product',          label: 'Product', wrap: true },
-  { key: 'NIC Code',         label: 'NIC Code' },
-  { key: 'Category',         label: 'Category' },
-  { key: 'Trend_Direction',  label: 'Trend', trend: true },
-  { key: 'Last_Updated',     label: 'Last Updated' },
-  { peak: true,              label: 'Peak Months' },
+  { key: 'State',           label: 'State' },
+  { key: 'Product',         label: 'Product', wrap: true },
+  { key: 'NIC Code',        label: 'NIC Code' },
+  { key: 'Category',        label: 'Category' },
+  { key: 'Trend_Direction', label: 'Trend', trend: true },
+  { key: 'Last_Updated',    label: 'Last Updated' },
+  { peak: true,             label: 'Peak Months' },
 ];
 
 const SUPPLY_COLS = [
-  { key: 'State',            label: 'State' },
-  { key: 'District',         label: 'District' },
-  { key: 'Pincode',          label: 'Pincode' },
-  { key: 'EnterpriseName',   label: 'Enterprise Name', wrap: true },
-  { key: 'NIC_Code',         label: 'NIC Code' },
-  { key: 'NIC_Description',  label: 'NIC Description', wrap: true },
-  { key: 'Category',         label: 'Category' },
+  { key: 'State',           label: 'State' },
+  { key: 'District',        label: 'District' },
+  { key: 'Pincode',         label: 'Pincode' },
+  { key: 'EnterpriseName',  label: 'Enterprise Name', wrap: true },
+  { key: 'NIC_Code',        label: 'NIC Code' },
+  { key: 'NIC_Description', label: 'NIC Description', wrap: true },
+  { key: 'Category',        label: 'Category' },
 ];
 
 // ── RENDER TABLE ──────────────────────────────────────────────────────────────
@@ -533,7 +584,7 @@ function renderTable() {
   thead.innerHTML = '<tr>' + cols.map(c => {
     const sorted = sortCol === c.key;
     const icon   = sorted ? (sortDir === 1 ? '▲' : '▼') : '⇅';
-    return `<th class="${sorted ? 'sorted' : ''}" onclick="sortBy('${c.key}')">${c.label} <span class="sort-icon">${icon}</span></th>`;
+    return `<th class="${sorted ? 'sorted' : ''}" onclick="sortBy('${c.key || ''}')">${c.label} <span class="sort-icon">${icon}</span></th>`;
   }).join('') + '</tr>';
 
   const start = (currentPage - 1) * PAGE_SIZE;
@@ -544,12 +595,13 @@ function renderTable() {
       filteredData.length === 0 && (currentSide === 'demand' ? demandData : supplyData).length === 0
         ? 'Upload a file to get started' : 'No rows match your filters'
     }</div></td></tr>`;
-    renderPagination(); return;
+    renderPagination();
+    return;
   }
 
   tbody.innerHTML = page.map(row => {
     return '<tr>' + cols.map(c => {
-      // Peak months computed column (demand side only)
+      // Peak months column
       if (c.peak) {
         const months = getPeakMonths(row);
         if (!months.length) return `<td class="peak-cell"><span class="pill-none">—</span></td>`;
@@ -562,10 +614,8 @@ function renderTable() {
         const cls = val.includes('Rising') ? 'tag-rising' : val.includes('Declining') ? 'tag-declining' : 'tag-stable';
         val = `<span class="tag ${cls}">${val}</span>`;
       } else if (c.key === 'NIC Code' || c.key === 'NIC_Code') {
-        // Format NIC codes as 5-digit numbers with leading zeros
         val = String(val).padStart(5, '0');
       } else if (c.key === 'Pincode') {
-        // Format pincodes as 6-digit numbers with leading zeros
         val = String(val).padStart(6, '0');
       } else if (typeof val === 'number') {
         val = val.toLocaleString();
@@ -578,16 +628,17 @@ function renderTable() {
 }
 
 function sortBy(col) {
+  if (!col) return;
   if (sortCol === col) sortDir *= -1; else { sortCol = col; sortDir = 1; }
   renderTable();
 }
 
 // ── PAGINATION ────────────────────────────────────────────────────────────────
 function renderPagination() {
-  const total = filteredData.length;
+  const total      = filteredData.length;
   const totalPages = Math.ceil(total / PAGE_SIZE);
-  const start = (currentPage - 1) * PAGE_SIZE + 1;
-  const end   = Math.min(currentPage * PAGE_SIZE, total);
+  const start      = (currentPage - 1) * PAGE_SIZE + 1;
+  const end        = Math.min(currentPage * PAGE_SIZE, total);
   document.getElementById('page-info').textContent =
     total ? `Rows ${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}` : '';
 
@@ -618,17 +669,18 @@ function updateStats() {
   document.getElementById('stat-filtered').textContent = filteredData.length.toLocaleString();
 
   if (currentSide === 'demand') {
-    const rising   = filteredData.filter(r => (r['Trend_Direction']||'').includes('Rising')).length;
-    const declining= filteredData.filter(r => (r['Trend_Direction']||'').includes('Declining')).length;
-    const withPeak = filteredData.filter(r => getPeakMonths(r).length > 0).length;
+    const rising    = filteredData.filter(r => (r['Trend_Direction']||'').includes('Rising')).length;
+    const declining = filteredData.filter(r => (r['Trend_Direction']||'').includes('Declining')).length;
+    const withPeak  = filteredData.filter(r => getPeakMonths(r).length > 0).length;
     set3Stats(rising, 'Rising Trends', declining, 'Declining', withPeak, 'With Peak Data');
   } else {
-    const states    = new Set(filteredData.map(r => r['State'])).size;
-    const districts = new Set(filteredData.map(r => r['District'])).size;
-    const categories= new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
+    const states     = new Set(filteredData.map(r => r['State'])).size;
+    const districts  = new Set(filteredData.map(r => r['District'])).size;
+    const categories = new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
     set3Stats(states, 'States', districts, 'Districts', categories, 'Categories');
   }
 }
+
 function set3Stats(v1,l1,v2,l2,v3,l3) {
   document.getElementById('stat-extra1').textContent     = Number(v1).toLocaleString();
   document.getElementById('stat-extra1-lbl').textContent = l1;
@@ -642,7 +694,8 @@ function set3Stats(v1,l1,v2,l2,v3,l3) {
 function refreshData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
-  demandData = []; supplyData = []; trendsMap = {};
+  setDemandData([]);
+  supplyData = []; trendsMap = {};
   ['trends-file-badge','supply-file-badge'].forEach(id =>
     document.getElementById(id).style.display = 'none');
   filteredData = [];
@@ -655,35 +708,32 @@ function refreshData() {
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
-function showLoading(msg) { document.getElementById('loading-msg').textContent = msg || 'Loading…'; document.getElementById('loading-overlay').classList.add('show'); }
-function hideLoading()    { document.getElementById('loading-overlay').classList.remove('show'); }
+function showLoading(msg) {
+  document.getElementById('loading-msg').textContent = msg || 'Loading…';
+  document.getElementById('loading-overlay').classList.add('show');
+}
+function hideLoading() { document.getElementById('loading-overlay').classList.remove('show'); }
 function updateLastUpdated() {
   const now = new Date();
-  document.getElementById('last-updated').textContent = `Updated ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`;
+  document.getElementById('last-updated').textContent =
+    `Updated ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`;
 }
 
 // ── DARK MODE ─────────────────────────────────────────────────────────────────
 function toggleDarkMode() {
-  const html = document.documentElement;
-  const currentTheme = html.getAttribute('data-theme');
-  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-  
+  const html     = document.documentElement;
+  const newTheme = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   html.setAttribute('data-theme', newTheme);
   document.getElementById('theme-text').textContent = newTheme === 'dark' ? 'Light Mode' : 'Dark Mode';
-  
-  // Save preference to localStorage
   localStorage.setItem('theme', newTheme);
 }
 
-// Load saved theme on page load
 window.addEventListener('DOMContentLoaded', () => {
   const savedTheme = localStorage.getItem('theme') || 'light';
   if (savedTheme === 'dark') {
     document.documentElement.setAttribute('data-theme', 'dark');
     document.getElementById('theme-text').textContent = 'Light Mode';
   }
-  
-  // Initialize dashboard
   applyFilters();
   updateLastUpdated();
 });
