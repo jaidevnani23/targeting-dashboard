@@ -1,13 +1,11 @@
 name: Update Google Trends Data
-
 on:
   schedule:
-    - cron: '0 6 1 * *'  # 6 AM UTC on 1st of each month
-  workflow_dispatch:     # Manual trigger button
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
-  actions: read
 
 jobs:
   scrape-and-update:
@@ -15,76 +13,76 @@ jobs:
     timeout-minutes: 1200
     
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      
-      - name: Set up Python 3.11
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-      
+          
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      - name: Verify input Excel exists
-        run: |
-          if [ ! -f "data/Demand_Excel_Filled.xlsx" ]; then
-            echo "❌ Error: Input file not found at data/Demand_Excel_Filled.xlsx"
-            ls -la data/
-            exit 1
-          fi
-          echo "✅ Input file found: data/Demand_Excel_Filled.xlsx"
-      
-      - name: Run Google Trends scraper
+        run: pip install -r requirements.txt
+        
+      - name: Run scraper
         env:
           BRIGHTDATA_USERNAME: ${{ secrets.BRIGHTDATA_USERNAME }}
           BRIGHTDATA_PASSWORD: ${{ secrets.BRIGHTDATA_PASSWORD }}
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
           BRIGHTDATA_PORT: ${{ secrets.BRIGHTDATA_PORT }}
+        run: python google_trends_scraper.py
+        
+      - name: Convert Excel to dashboard JSON
         run: |
-          echo "🚀 Starting Google Trends scraper..."
-          python google_trends_scraper.py
-          echo "✅ Scraper completed"
-      
-      - name: Verify outputs were created
+          python3 - << 'EOF'
+          import pandas as pd
+          import json
+          from datetime import datetime
+          
+          df = pd.read_excel('data/Demand_Excel_With_Trends.xlsx').fillna('')
+          
+          if 'NIC Code' in df.columns:
+              df['NIC Code'] = df['NIC Code'].apply(lambda x: str(int(float(x))) if x not in ('', None) else '')
+          
+          rows = []
+          for _, row in df.iterrows():
+              if not row.get('Trend_Direction'): 
+                  continue
+              record = {
+                  k: str(row[k]) if k == 'Last_Updated' else row[k]
+                  for k in ['State','Product','NIC Code','Category','Search Term','Avg_Interest_5Y','Trend_Direction','Last_Updated']
+              }
+              seen, rank = set(), 1
+              for i in range(1, 21):
+                  m = str(row.get(f'Top_{i}_Month', '')).strip()
+                  if not m: 
+                      continue
+                  try: 
+                      name = datetime.strptime(m, '%Y-%m').strftime('%B')
+                  except: 
+                      name = m
+                  if name not in seen:
+                      seen.add(name)
+                      record[f'Top_{rank}_Month'] = name
+                      rank += 1
+              rows.append(record)
+          
+          with open('data/dashboard_trends_data.json','w') as f:
+              json.dump(rows, f, indent=2, ensure_ascii=False)
+          
+          print(f"Exported {len(rows)} rows")
+          EOF
+          
+      - name: Commit updated files
         run: |
-          echo "📊 Checking output files..."
-          ls -lh data/
-          
-          if [ -f "data/dashboard_trends_data.json" ]; then
-            echo "✅ JSON file created"
-            wc -l data/dashboard_trends_data.json
-          else
-            echo "⚠️  JSON file not found"
-          fi
-          
-          if [ -f "data/Demand_Excel_With_Trends.xlsx" ]; then
-            echo "✅ Excel output created"
-          else
-            echo "⚠️  Excel output not found"
-          fi
-      
-      - name: Commit and push changes
-        run: |
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-          # Add all generated files
-          git add data/dashboard_trends_data.json || true
-          git add data/Demand_Excel_With_Trends.xlsx || true
-          git add data/scraping_progress.json || true
-          
-          # Check if there are changes to commit
-          if git diff --staged --quiet; then
-            echo "📝 No changes detected - nothing to commit"
-          else
-            echo "💾 Committing changes..."
-            git commit -m "🤖 Auto-update trends data - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/dashboard_trends_data.json data/Demand_Excel_With_Trends.xlsx || true
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-update trends data $(date +'%Y-%m-%d')"
             git push
-            echo "✅ Changes pushed to repository"
+          else
+            echo "No changes to commit"
           fi
