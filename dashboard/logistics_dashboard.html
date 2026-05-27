@@ -443,7 +443,7 @@ function downloadFiltered() {
     const wb  = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, currentSide === 'demand' ? 'Demand Data' : 'Supply Data');
     const ts  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    XLSX.writeFile(wb, `logistics_supply_${ts}.xlsx`, { bookType: 'xlsx', compression: true });
+    XLSX.writeFile(wb, `logistics_${currentSide}_${ts}.xlsb`, { bookType: 'xlsb' });
     hideLoading();
   } catch (err) {
     console.error('Download error:', err);
