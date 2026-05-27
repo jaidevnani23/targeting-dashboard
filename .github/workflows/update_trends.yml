@@ -1,15 +1,18 @@
 name: Update Google Trends Data
-
 on:
   schedule:
     - cron: '0 6 1 * *'
   workflow_dispatch:
 
-jobs:
-  scrape-and-update:
-    runs-on: ubuntu-latest
-    timeout-minutes: 1200
+permissions:
+  contents: write
+  actions: write
 
+jobs:
+
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -22,49 +25,95 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Run scraper with progress commit on kill
         env:
           BRIGHTDATA_USERNAME: ${{ secrets.BRIGHTDATA_USERNAME }}
           BRIGHTDATA_PASSWORD: ${{ secrets.BRIGHTDATA_PASSWORD }}
           BRIGHTDATA_HOST:     ${{ secrets.BRIGHTDATA_HOST }}
           BRIGHTDATA_PORT:     ${{ secrets.BRIGHTDATA_PORT }}
-        run: python google_trends_scraper.py
+        run: |
+          cleanup() {
+            echo "⚠️ Signal received — committing progress before exit..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/scraping_progress.json data/Demand_Excel_With_Trends.xlsx data/dashboard_trends_data.json || true
+            git diff --staged --quiet || git commit -m "Partial progress $(date +'%Y-%m-%d %H:%M:%S')"
+            git push || true
+            echo "✅ Progress committed"
+          }
+          trap cleanup EXIT SIGTERM SIGINT
 
-      - name: Convert Excel to dashboard JSON
+          # Kill the scraper after 5h 45m — gives 15 min buffer before
+          # GitHub's hard 6h kill, enough time for git push to complete
+          timeout 20700 python google_trends_scraper.py || true
+
+  retrigger:
+    runs-on: ubuntu-latest
+    needs: scrape
+    if: always()
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Pull latest commit
+        # The scrape job's trap may have pushed a new commit just before
+        # dying — we must pull it here or we're reading stale progress.json
+        run: git pull origin main
+
+      - name: Install dependencies
+        run: pip install pandas openpyxl
+
+      - name: Check remaining and re-trigger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - << 'EOF'
-          import pandas as pd, json
-          from datetime import datetime
+          import json, sys
+          from pathlib import Path
+          import pandas as pd
 
-          df = pd.read_excel('data/Demand_Excel_With_Trends.xlsx').fillna('')
-          if 'NIC Code' in df.columns:
-              df['NIC Code'] = df['NIC Code'].apply(lambda x: str(int(float(x))) if x not in ('', None) else '')
+          progress_file = Path("data/scraping_progress.json")
+          excel_file    = Path("data/Demand_Excel_With_Trends.xlsx")
 
-          rows = []
-          for _, row in df.iterrows():
-              if not row.get('Trend_Direction'): continue
-              record = {k: str(row[k]) if k == 'Last_Updated' else row[k]
-                        for k in ['State','Product','NIC Code','Category','Search Term','Avg_Interest_5Y','Trend_Direction','Last_Updated']}
-              seen, rank = set(), 1
-              for i in range(1, 21):
-                  m = str(row.get(f'Top_{i}_Month', '')).strip()
-                  if not m: continue
-                  try: name = datetime.strptime(m, '%Y-%m').strftime('%B')
-                  except: name = m
-                  if name not in seen:
-                      seen.add(name)
-                      record[f'Top_{rank}_Month'] = name
-                      rank += 1
-              rows.append(record)
+          if not progress_file.exists() or not excel_file.exists():
+              print("No progress file found — assuming first run or incomplete")
+              open("RETRIGGER", "w").close()
+              sys.exit(0)
 
-          json.dump(rows, open('data/dashboard_trends_data.json','w'), indent=2, ensure_ascii=False)
-          print(f"Exported {len(rows)} rows")
+          with open(progress_file) as f:
+              progress = json.load(f)
+
+          df        = pd.read_excel(excel_file)
+          total     = len(df)
+          scraped   = len(progress.get("scraped_indices", []))
+          remaining = total - scraped
+
+          # Only count products that have failed 5 times or fewer
+          # Products failing more than 5 times are likely permanently
+          # unavailable on Google Trends and should not block the chain
+          actionable_failures = {
+              k: v for k, v in progress.get("failed_attempts", {}).items()
+              if v <= 5
+          }
+          failed = len(actionable_failures)
+
+          print(f"Total:     {total}")
+          print(f"Scraped:   {scraped}")
+          print(f"Remaining: {remaining}")
+          print(f"Failed:    {failed} (capped at 5 attempts each)")
+
+          if remaining > 0 or failed > 0:
+              print("⏳ Work remains — will re-trigger after 20 min")
+              open("RETRIGGER", "w").close()
+          else:
+              print("✅ All products scraped — stopping chain")
           EOF
 
-      - name: Commit updated files
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/dashboard_trends_data.json data/Demand_Excel_With_Trends.xlsx || true
-          git diff --staged --quiet || git commit -m "Auto-update trends data $(date +'%Y-%m-%d')"
-          git push || true
+          if [ -f RETRIGGER ]; then
+            echo "⏳ Waiting 20 minutes before next run..."
+            sleep 1200
+            echo "🔁 Triggering next run..."
+            gh workflow run update-trends.yml
+          else
+            echo "🎉 All done! No further runs needed."
+          fi
