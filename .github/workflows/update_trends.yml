@@ -113,7 +113,7 @@ jobs:
             echo "⏳ Waiting 20 minutes before next run..."
             sleep 1200
             echo "🔁 Triggering next run..."
-            gh workflow run update-trends.yml
+            gh workflow run update_trends.yml
           else
             echo "🎉 All done! No further runs needed."
           fi
