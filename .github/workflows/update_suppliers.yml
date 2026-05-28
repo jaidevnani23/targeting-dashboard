@@ -1,16 +1,18 @@
 name: Update Suppliers
-
 on:
   schedule:
-    - cron: '0 8 1 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 8 AM UTC / 1:30 PM IST
-  workflow_dispatch:               # manual trigger
+    # FIX 3: Staggered by 2 hours from update_products.yml (which runs at 08:00 UTC).
+    # Previously both workflows ran at exactly 0 8 1 1,4,7,10 * causing simultaneous
+    # git pushes to main — one would silently fail with a push conflict.
+    # Now: suppliers runs at 10:00 UTC, products at 08:00 UTC — no overlap.
+    - cron: '0 10 1 1,4,7,10 *'
+  workflow_dispatch:
 
 jobs:
   fetch-suppliers:
     name: Fetch MSME Suppliers (All States)
     runs-on: ubuntu-latest
-    timeout-minutes: 360           # 6-hour cap — 36 states × ~10 min each worst-case
-
+    timeout-minutes: 360
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -38,7 +40,6 @@ jobs:
       # between batches, throughput stays well under 360 calls/hour.
       # If you hit 429s, raise MIN_BATCH_DELAY / MAX_BATCH_DELAY in the script.
       # ───────────────────────────────────────────────────────────────────────
-
       - name: Run MSME supplier fetcher
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
@@ -53,13 +54,14 @@ jobs:
             exit 1
           fi
 
-      # Commit supplier JSONs + checkpoint file (if run was incomplete, the
-      # checkpoint persists so a manual re-run can resume where it left off.
-      # Once all states succeed, the script deletes the checkpoint itself.)
+      # FIX 4: Checkpoint is now named fetch_checkpoint.json (no leading dot)
+      # so Git does not ignore it. This means interrupted runs can resume
+      # from where they left off on the next workflow_dispatch.
       - name: Commit and push supplier data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
           git add data/suppliers/
           git diff --cached --quiet && echo "No changes to commit." || \
             git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
@@ -67,10 +69,11 @@ jobs:
 
       - name: Warn if run was incomplete
         run: |
-          if [ -f "data/suppliers/.fetch_checkpoint.json" ]; then
+          # FIX 4: Updated checkpoint filename to match the renamed file
+          if [ -f "data/suppliers/fetch_checkpoint.json" ]; then
             failed=$(python3 -c "
           import json
-          with open('data/suppliers/.fetch_checkpoint.json') as f:
+          with open('data/suppliers/fetch_checkpoint.json') as f:
             d = json.load(f)
           failed = d.get('failed', [])
           completed = d.get('completed', [])
