@@ -32,13 +32,9 @@ jobs:
         run: pip install requests pandas openpyxl python-dotenv beautifulsoup4 lxml
 
       - name: Run product discovery
-        env:
-          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
         run: python product_discovery.py
 
       - name: Run product updater
-        env:
-          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
         run: python product_updater.py
 
       - name: Commit and push product data
