@@ -105,8 +105,8 @@ def build_new_rows(approved: list, existing_df: pd.DataFrame) -> pd.DataFrame:
         existing_df[prod_col].str.lower().str.strip()
     ))
 
-    new_rows       = []
-    skipped_dupes  = 0
+    new_rows          = []
+    skipped_dupes     = 0
     skipped_no_states = 0
 
     for suggestion in approved:
