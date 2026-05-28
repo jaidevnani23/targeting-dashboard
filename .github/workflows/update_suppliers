@@ -1,0 +1,83 @@
+name: Update Suppliers
+
+on:
+  schedule:
+    - cron: '0 8 2 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 8 AM UTC / 1:30 PM IST
+  workflow_dispatch:               # manual trigger
+
+jobs:
+  fetch-suppliers:
+    name: Fetch MSME Suppliers (All States)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360           # 6-hour cap — 36 states × ~10 min each worst-case
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-suppliers-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-suppliers-
+
+      - name: Install dependencies
+        run: pip install requests pandas openpyxl python-dotenv
+
+      # ── RATE LIMIT NOTE ────────────────────────────────────────────────────
+      # data.gov.in enforces 1,000 API calls/hour per key (per HTTP request,
+      # not per record). The fetcher uses BATCH_SIZE=1000 records per call,
+      # so each paginated fetch counts as 1 call. With ~7-10s random delays
+      # between batches, throughput stays well under 360 calls/hour.
+      # If you hit 429s, raise MIN_BATCH_DELAY / MAX_BATCH_DELAY in the script.
+      # ───────────────────────────────────────────────────────────────────────
+
+      - name: Run MSME supplier fetcher
+        env:
+          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
+        run: python msme_supplier_fetcher.py
+
+      - name: Check outputs were produced
+        run: |
+          count=$(find data/suppliers -name "suppliers_*.json" 2>/dev/null | wc -l)
+          echo "Supplier files produced: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No supplier files were written — check API key and script logs."
+            exit 1
+          fi
+
+      # Commit supplier JSONs + checkpoint file (if run was incomplete, the
+      # checkpoint persists so a manual re-run can resume where it left off.
+      # Once all states succeed, the script deletes the checkpoint itself.)
+      - name: Commit and push supplier data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/suppliers/
+          git diff --cached --quiet && echo "No changes to commit." || \
+            git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
+          git push
+
+      - name: Warn if run was incomplete
+        run: |
+          if [ -f "data/suppliers/.fetch_checkpoint.json" ]; then
+            failed=$(python3 -c "
+          import json
+          with open('data/suppliers/.fetch_checkpoint.json') as f:
+            d = json.load(f)
+          failed = d.get('failed', [])
+          completed = d.get('completed', [])
+          print(f'Completed: {len(completed)}/36 states')
+          if failed:
+            print('Failed states: ' + ', '.join(failed))
+            ")
+            echo "::warning::Run was incomplete. $failed"
+            echo "To resume: go to Actions → Update Suppliers → Run workflow"
+          fi
