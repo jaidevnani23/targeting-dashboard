@@ -277,18 +277,33 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
                 })
 
     elif flat_nic_col:
-        df[flat_nic_col] = df[flat_nic_col].astype(str).str.strip()
-        filtered = df[df[flat_nic_col].isin(nic_set)].copy()
-        for _, row in filtered.iterrows():
-            nic_code = str(row.get(flat_nic_col, "")).strip()
+    # DELETE everything in this block and replace with:
+    for _, row in df.iterrows():
+        raw_nic = str(row.get(flat_nic_col, "")).strip()
+        if not raw_nic or raw_nic == 'nan':
+            continue
+
+        # Parse " 1) 14101; 2) 22199; 3) 32909" → ["14101", "22199", "32909"]
+        codes = []
+        for part in raw_nic.split(';'):
+            # Strip the "1) " prefix and whitespace
+            code = part.strip()
+            if ')' in code:
+                code = code.split(')')[-1].strip()
+            if code and code != 'nan':
+                codes.append(code)
+
+        for code in codes:
+            if code not in nic_set:
+                continue
             results.append({
                 "State":           str(row.get("State", state)).strip().title(),
                 "District":        str(row.get("District", "")).strip().title(),
                 "Pincode":         str(row.get("Pincode", "")).strip(),
                 "EnterpriseName":  str(row.get("EnterpriseName", "")).strip().title(),
-                "NIC_Code":        nic_code,
-                "NIC_Description": nic_desc.get(nic_code, str(row.get("NIC5DigitCode", ""))),
-                "Category":        cat_map.get(nic_code, "Uncategorised"),
+                "NIC_Code":        code,
+                "NIC_Description": nic_desc.get(code, ""),
+                "Category":        cat_map.get(code, "Uncategorised"),
             })
 
     else:
