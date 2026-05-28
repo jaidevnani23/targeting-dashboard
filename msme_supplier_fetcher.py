@@ -39,6 +39,7 @@ BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
 DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
 OUTPUT_DIR     = "data/suppliers"
+CHECKPOINT_FILE = "data/suppliers/.fetch_checkpoint.json"   # ← hidden from normal file listings
 
 BATCH_SIZE       = 1000
 TIMEOUT_SEC      = 120      # increased from 60 to handle slow API responses
@@ -63,6 +64,41 @@ STATES_AND_UTS = [
     "PUDUCHERRY", "PUNJAB", "RAJASTHAN", "SIKKIM", "TAMIL NADU", "TELANGANA",
     "TRIPURA", "UTTAR PRADESH", "UTTARAKHAND", "WEST BENGAL",
 ]
+
+# ── CHECKPOINT ────────────────────────────────────────────────────────────────
+def load_checkpoint() -> dict:
+    """
+    Returns the checkpoint dict: {"completed": [...], "failed": [...]}
+    If no checkpoint exists (fresh run), returns empty lists.
+    """
+    if not os.path.exists(CHECKPOINT_FILE):
+        return {"completed": [], "failed": []}
+    try:
+        with open(CHECKPOINT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        log.info(f"Checkpoint loaded — {len(data.get('completed', []))} states already done, "
+                 f"{len(data.get('failed', []))} previously failed")
+        return data
+    except Exception as e:
+        log.warning(f"Could not read checkpoint file: {e}. Starting fresh.")
+        return {"completed": [], "failed": []}
+
+
+def save_checkpoint(checkpoint: dict):
+    """Atomically writes the checkpoint file after each completed state."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    tmp = CHECKPOINT_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(checkpoint, f, indent=2)
+    os.replace(tmp, CHECKPOINT_FILE)   # atomic on POSIX; best-effort on Windows
+
+
+def clear_checkpoint():
+    """Removes the checkpoint file after a fully successful run."""
+    if os.path.exists(CHECKPOINT_FILE):
+        os.remove(CHECKPOINT_FILE)
+        log.info("Checkpoint cleared — clean run complete.")
+
 
 # ── LOAD REFERENCE FILES ──────────────────────────────────────────────────────
 def load_nic_codes():
@@ -244,11 +280,21 @@ def main():
     nic_set, nic_desc = load_nic_codes()
     cat_map           = load_category_mapping()
 
-    total_suppliers = 0
-    failed_states   = []
+    # ── Resume from checkpoint if a previous run was interrupted ──────────────
+    checkpoint     = load_checkpoint()
+    completed_set  = set(checkpoint.get("completed", []))
+    failed_states  = list(checkpoint.get("failed", []))   # carry forward prior failures
 
-    for i, state in enumerate(STATES_AND_UTS, 1):
-        log.info(f"\n[{i:02d}/{len(STATES_AND_UTS)}] Processing: {state.title()}")
+    remaining = [s for s in STATES_AND_UTS if s not in completed_set]
+    if len(remaining) < len(STATES_AND_UTS):
+        skipped = len(STATES_AND_UTS) - len(remaining)
+        log.info(f"Resuming — skipping {skipped} already-completed state(s), "
+                 f"{len(remaining)} remaining.")
+
+    total_suppliers = 0
+
+    for i, state in enumerate(remaining, 1):
+        log.info(f"\n[{i:02d}/{len(remaining)}] Processing: {state.title()}")
         try:
             records = process_state(state, nic_set, nic_desc, cat_map)
             if records:
@@ -256,22 +302,39 @@ def main():
                 total_suppliers += len(records)
             else:
                 log.info(f"[{state}] No matching suppliers — skipping file.")
+
+            # ── Mark state as done and persist immediately ─────────────────
+            completed_set.add(state)
+            # Remove from failed list if it previously failed and now succeeded
+            failed_states = [s for s in failed_states if s != state]
+            checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
+            save_checkpoint(checkpoint)
+
         except Exception as e:
             log.error(f"[{state}] FAILED: {e}")
-            failed_states.append(state)
+            if state not in failed_states:
+                failed_states.append(state)
+            # Save updated failed list to checkpoint so we know what to re-run
+            checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
+            save_checkpoint(checkpoint)
 
-        if i < len(STATES_AND_UTS):
+        if i < len(remaining):
             time.sleep(STATE_DELAY_SEC)
 
     log.info("\n" + "=" * 60)
     log.info(f"Total suppliers saved : {total_suppliers:,}")
     log.info(f"Output folder         : {OUTPUT_DIR}/")
+
     if failed_states:
-        log.info("Failed states:")
+        log.info("Failed states (will be retried on next run):")
         for s in failed_states:
             log.info(f"  - {s.title()}")
     else:
         log.info("All states completed successfully.")
+        # Only clear the checkpoint when everything succeeded (including no prior failures)
+        if not (set(STATES_AND_UTS) - completed_set):
+            clear_checkpoint()
+
     log.info("=" * 60)
 
 
