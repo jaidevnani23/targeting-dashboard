@@ -4,7 +4,7 @@ MSME Supplier Fetcher
 =====================
 Fetches MSME registered units from data.gov.in API, filters by NIC codes
 in data/Key_NIC_Codes_List.xlsx, maps categories from data/Demand_Excel_Filled.xlsx,
-and outputs one suppliers_[State].json per state into data/suppliers/.
+and outputs one suppliers_[State].csv per state into data/suppliers/.
 
 Adding new NIC codes to Key_NIC_Codes_List.xlsx automatically expands
 what gets fetched and categorised — no code changes needed.
@@ -42,8 +42,6 @@ NIC_CODES_FILE  = "data/Key_NIC_Codes_List.xlsx"
 DEMAND_FILE     = "data/Demand_Excel_Filled.xlsx"
 OUTPUT_DIR      = "data/suppliers"
 
-# FIX 4: Renamed from .fetch_checkpoint.json (dotfile) to a plain name
-# so Git does not silently ignore it, allowing resume to work across runs.
 CHECKPOINT_FILE = "data/suppliers/fetch_checkpoint.json"
 
 BATCH_SIZE       = 1000
@@ -71,10 +69,6 @@ STATES_AND_UTS = [
 ]
 
 # ── FIX 1: ROBUST COLUMN DETECTION ───────────────────────────────────────────
-# Instead of silently returning [] when column names don't match exactly,
-# we log what columns the API actually returned, try multiple known variants,
-# and only give up (with a clear error) if truly nothing matches.
-
 def find_column(df_columns, *keywords):
     """
     Case-insensitive search for a column whose name contains ANY of the
@@ -96,13 +90,9 @@ def detect_nic_columns(df):
     """
     log.info(f"  API columns: {list(df.columns)}")
 
-    # Activities column: nested JSON array of NIC entries per enterprise
     activities_col = find_column(df.columns,
                                  'activit', 'activities', 'activity')
 
-    # Flat NIC column: a single NIC code per row
-    # The API has been seen returning: NIC5DigitId, NIC5DigitCode,
-    # nic_code, NICCode, NIC_Code, nic5digitid, etc.
     flat_nic_col = find_column(df.columns,
                                'nic5digit', 'nic_code', 'niccode',
                                'nic5', 'nic')
@@ -220,10 +210,6 @@ def fetch_all_for_state(state: str) -> pd.DataFrame:
     offsets     = list(range(BATCH_SIZE, total, BATCH_SIZE))
     log.info(f"[{state}] {total:,} records across {1 + len(offsets)} pages")
 
-    # FIX 2: Delays moved OUTSIDE the thread pool, into a plain sequential loop.
-    # Previously, all futures were submitted at once and each slept inside the
-    # thread — causing delays to stack up before any page was actually fetched.
-    # Now we just loop, delay, fetch, repeat — simple and predictable.
     for idx, off in enumerate(offsets):
         random_batch_delay()
         records = fetch_page(state, off).get("records", [])
@@ -240,7 +226,6 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
         log.info(f"[{state}] No records returned from API.")
         return []
 
-    # FIX 1: Use robust column detection instead of fragile single-keyword match
     activities_col, flat_nic_col = detect_nic_columns(df)
 
     results = []
@@ -256,7 +241,6 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
             for activity in activities:
                 if not isinstance(activity, dict):
                     continue
-                # Try multiple known key names for NIC code inside the activity object
                 nic_code = (
                     str(activity.get("NIC5DigitId", "") or
                         activity.get("NIC5DigitCode", "") or
@@ -277,38 +261,34 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
                 })
 
     elif flat_nic_col:
-    # DELETE everything in this block and replace with:
-    for _, row in df.iterrows():
-        raw_nic = str(row.get(flat_nic_col, "")).strip()
-        if not raw_nic or raw_nic == 'nan':
-            continue
-
-        # Parse " 1) 14101; 2) 22199; 3) 32909" → ["14101", "22199", "32909"]
-        codes = []
-        for part in raw_nic.split(';'):
-            # Strip the "1) " prefix and whitespace
-            code = part.strip()
-            if ')' in code:
-                code = code.split(')')[-1].strip()
-            if code and code != 'nan':
-                codes.append(code)
-
-        for code in codes:
-            if code not in nic_set:
+        for _, row in df.iterrows():
+            raw_nic = str(row.get(flat_nic_col, "")).strip()
+            if not raw_nic or raw_nic == 'nan':
                 continue
-            results.append({
-                "State":           str(row.get("State", state)).strip().title(),
-                "District":        str(row.get("District", "")).strip().title(),
-                "Pincode":         str(row.get("Pincode", "")).strip(),
-                "EnterpriseName":  str(row.get("EnterpriseName", "")).strip().title(),
-                "NIC_Code":        code,
-                "NIC_Description": nic_desc.get(code, ""),
-                "Category":        cat_map.get(code, "Uncategorised"),
-            })
+
+            # Parse " 1) 14101; 2) 22199; 3) 32909" → ["14101", "22199", "32909"]
+            codes = []
+            for part in raw_nic.split(';'):
+                code = part.strip()
+                if ')' in code:
+                    code = code.split(')')[-1].strip()
+                if code and code != 'nan':
+                    codes.append(code)
+
+            for code in codes:
+                if code not in nic_set:
+                    continue
+                results.append({
+                    "State":           str(row.get("State", state)).strip().title(),
+                    "District":        str(row.get("District", "")).strip().title(),
+                    "Pincode":         str(row.get("Pincode", "")).strip(),
+                    "EnterpriseName":  str(row.get("EnterpriseName", "")).strip().title(),
+                    "NIC_Code":        code,
+                    "NIC_Description": nic_desc.get(code, ""),
+                    "Category":        cat_map.get(code, "Uncategorised"),
+                })
 
     else:
-        # FIX 1: Instead of silently returning [], log a clear actionable error
-        # showing exactly what columns the API sent back.
         log.error(
             f"[{state}] Could not find a NIC code column. "
             f"API returned these columns: {list(df.columns)}. "
@@ -321,12 +301,11 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
 
 
 # ── SAVE ──────────────────────────────────────────────────────────────────────
-def save_state_json(state: str, records: list):
+def save_state_csv(state: str, records: list):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     safe_name = state.title().replace(" ", "_")
-    path      = os.path.join(OUTPUT_DIR, f"suppliers_{safe_name}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    path      = os.path.join(OUTPUT_DIR, f"suppliers_{safe_name}.csv")
+    pd.DataFrame(records).to_csv(path, index=False, encoding="utf-8-sig")
     log.info(f"[{state}] Saved {len(records):,} suppliers → {path}")
 
 
@@ -356,7 +335,7 @@ def main():
         try:
             records = process_state(state, nic_set, nic_desc, cat_map)
             if records:
-                save_state_json(state, records)
+                save_state_csv(state, records)
                 total_suppliers += len(records)
             else:
                 log.info(f"[{state}] No matching suppliers — skipping file.")
