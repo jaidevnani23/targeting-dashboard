@@ -1,0 +1,51 @@
+name: Update Products
+
+on:
+  schedule:
+    - cron: '0 8 2 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 8 AM UTC / 1:30 PM IST
+  workflow_dispatch:               # manual trigger
+
+jobs:
+  update-products:
+    name: Discover and Update Products
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-products-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-products-
+
+      - name: Install dependencies
+        run: pip install requests pandas openpyxl python-dotenv beautifulsoup4 lxml
+
+      - name: Run product discovery
+        env:
+          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
+        run: python product_discovery.py
+
+      - name: Run product updater
+        env:
+          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
+        run: python product_updater.py
+
+      - name: Commit and push product data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No changes to commit." || \
+            git commit -m "chore(data): refresh product data [$(date -u +'%Y-%m-%d')]"
+          git push
