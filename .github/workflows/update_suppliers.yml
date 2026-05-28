@@ -1,13 +1,11 @@
 name: Update Suppliers
 on:
   schedule:
-    # FIX 3: Staggered by 2 hours from update_products.yml (which runs at 08:00 UTC).
-    # Previously both workflows ran at exactly 0 8 1 1,4,7,10 * causing simultaneous
-    # git pushes to main — one would silently fail with a push conflict.
-    # Now: suppliers runs at 10:00 UTC, products at 08:00 UTC — no overlap.
-    - cron: '0 10 1 1,4,7,10 *'
+    # FIX 3: Staggered from update_products.yml to avoid simultaneous git pushes
+    # to main (which caused silent push conflicts).
+    # Now: suppliers runs at 00:30 UTC (06:00 IST), products at 08:00 UTC — no overlap.
+    - cron: '30 0 1 1,4,7,10 *'
   workflow_dispatch:
-
 jobs:
   fetch-suppliers:
     name: Fetch MSME Suppliers (All States)
@@ -16,12 +14,10 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
@@ -29,10 +25,8 @@ jobs:
           key: ${{ runner.os }}-pip-suppliers-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-suppliers-
-
       - name: Install dependencies
         run: pip install requests pandas openpyxl python-dotenv
-
       # ── RATE LIMIT NOTE ────────────────────────────────────────────────────
       # data.gov.in enforces 1,000 API calls/hour per key (per HTTP request,
       # not per record). The fetcher uses BATCH_SIZE=1000 records per call,
@@ -44,16 +38,14 @@ jobs:
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
         run: python msme_supplier_fetcher.py
-
       - name: Check outputs were produced
         run: |
-          count=$(find data/suppliers -name "suppliers_*.json" 2>/dev/null | wc -l)
+          count=$(find data/suppliers -name "suppliers_*.csv" 2>/dev/null | wc -l)
           echo "Supplier files produced: $count"
           if [ "$count" -eq 0 ]; then
             echo "::error::No supplier files were written — check API key and script logs."
             exit 1
           fi
-
       # FIX 4: Checkpoint is now named fetch_checkpoint.json (no leading dot)
       # so Git does not ignore it. This means interrupted runs can resume
       # from where they left off on the next workflow_dispatch.
@@ -66,7 +58,6 @@ jobs:
           git diff --cached --quiet && echo "No changes to commit." || \
             git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
           git push
-
       - name: Warn if run was incomplete
         run: |
           # FIX 4: Updated checkpoint filename to match the renamed file
