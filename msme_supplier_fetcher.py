@@ -32,7 +32,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-API_KEY      = os.getenv("DATA_GOV_API_KEY", "579b464db66ec23bdd00000154d8f54213c049ed75275e408a101619")
+API_KEY = os.getenv("DATA_GOV_API_KEY")
+if not API_KEY:
+    raise EnvironmentError("DATA_GOV_API_KEY not set in environment or .env file")
 RESOURCE_ID  = "2c1fd4a5-67c7-4672-a2c6-a0a76c2f00da"
 BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
