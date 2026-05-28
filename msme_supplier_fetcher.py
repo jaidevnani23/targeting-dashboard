@@ -35,21 +35,24 @@ load_dotenv()
 API_KEY = os.getenv("DATA_GOV_API_KEY")
 if not API_KEY:
     raise EnvironmentError("DATA_GOV_API_KEY not set in environment or .env file")
-RESOURCE_ID  = "8b68ae56-84cf-4728-a0a6-1be11028dea7"
+RESOURCE_ID  = "2c1fd4a5-67c7-4672-a2c6-a0a76c2f00da"
 BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
-NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
-DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
-OUTPUT_DIR     = "data/suppliers"
-CHECKPOINT_FILE = "data/suppliers/.fetch_checkpoint.json"   # ← hidden from normal file listings
+NIC_CODES_FILE  = "data/Key_NIC_Codes_List.xlsx"
+DEMAND_FILE     = "data/Demand_Excel_Filled.xlsx"
+OUTPUT_DIR      = "data/suppliers"
+
+# FIX 4: Renamed from .fetch_checkpoint.json (dotfile) to a plain name
+# so Git does not silently ignore it, allowing resume to work across runs.
+CHECKPOINT_FILE = "data/suppliers/fetch_checkpoint.json"
 
 BATCH_SIZE       = 1000
-TIMEOUT_SEC      = 120      # increased from 60 to handle slow API responses
+TIMEOUT_SEC      = 120
 MAX_RETRIES      = 5
-MIN_BATCH_DELAY  = 6.77585  # minimum seconds between batches
-MAX_BATCH_DELAY  = 9.84774  # maximum seconds between batches
-STATE_DELAY_SEC  = 2        # increased from 0.5 to give API breathing room
-MAX_PAGE_WORKERS = 1        # sequential page fetching — more reliable on gov API
+MIN_BATCH_DELAY  = 6.77585
+MAX_BATCH_DELAY  = 9.84774
+STATE_DELAY_SEC  = 2
+MAX_PAGE_WORKERS = 1
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -67,12 +70,49 @@ STATES_AND_UTS = [
     "TRIPURA", "UTTAR PRADESH", "UTTARAKHAND", "WEST BENGAL",
 ]
 
+# ── FIX 1: ROBUST COLUMN DETECTION ───────────────────────────────────────────
+# Instead of silently returning [] when column names don't match exactly,
+# we log what columns the API actually returned, try multiple known variants,
+# and only give up (with a clear error) if truly nothing matches.
+
+def find_column(df_columns, *keywords):
+    """
+    Case-insensitive search for a column whose name contains ANY of the
+    given keywords. Returns the first match, or None if nothing found.
+    Logs every candidate it sees so you can debug API column name changes.
+    """
+    cols_lower = {c.lower(): c for c in df_columns}
+    for kw in keywords:
+        for lower, original in cols_lower.items():
+            if kw.lower() in lower:
+                return original
+    return None
+
+
+def detect_nic_columns(df):
+    """
+    Returns (activities_col, flat_nic_col) — at most one will be non-None.
+    Logs the actual column list so you can see exactly what the API returned.
+    """
+    log.info(f"  API columns: {list(df.columns)}")
+
+    # Activities column: nested JSON array of NIC entries per enterprise
+    activities_col = find_column(df.columns,
+                                 'activit', 'activities', 'activity')
+
+    # Flat NIC column: a single NIC code per row
+    # The API has been seen returning: NIC5DigitId, NIC5DigitCode,
+    # nic_code, NICCode, NIC_Code, nic5digitid, etc.
+    flat_nic_col = find_column(df.columns,
+                               'nic5digit', 'nic_code', 'niccode',
+                               'nic5', 'nic')
+
+    log.info(f"  Detected → activities_col={activities_col!r}, flat_nic_col={flat_nic_col!r}")
+    return activities_col, flat_nic_col
+
+
 # ── CHECKPOINT ────────────────────────────────────────────────────────────────
 def load_checkpoint() -> dict:
-    """
-    Returns the checkpoint dict: {"completed": [...], "failed": [...]}
-    If no checkpoint exists (fresh run), returns empty lists.
-    """
     if not os.path.exists(CHECKPOINT_FILE):
         return {"completed": [], "failed": []}
     try:
@@ -87,16 +127,14 @@ def load_checkpoint() -> dict:
 
 
 def save_checkpoint(checkpoint: dict):
-    """Atomically writes the checkpoint file after each completed state."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     tmp = CHECKPOINT_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(checkpoint, f, indent=2)
-    os.replace(tmp, CHECKPOINT_FILE)   # atomic on POSIX; best-effort on Windows
+    os.replace(tmp, CHECKPOINT_FILE)
 
 
 def clear_checkpoint():
-    """Removes the checkpoint file after a fully successful run."""
     if os.path.exists(CHECKPOINT_FILE):
         os.remove(CHECKPOINT_FILE)
         log.info("Checkpoint cleared — clean run complete.")
@@ -130,7 +168,6 @@ def load_category_mapping():
 
 # ── RANDOM DELAY ──────────────────────────────────────────────────────────────
 def random_batch_delay():
-    """Sleep for a highly randomized duration between batches to avoid rate limiting"""
     delay = random.uniform(MIN_BATCH_DELAY, MAX_BATCH_DELAY)
     log.info(f"💤 Waiting {delay:.5f}s before next batch...")
     time.sleep(delay)
@@ -167,7 +204,7 @@ def fetch_page(state: str, offset: int) -> dict:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            wait = 30 * (2 ** (attempt - 1))   # 30s, 60s, 120s, 240s, 480s
+            wait = 30 * (2 ** (attempt - 1))
             log.warning(f"[{state}] offset={offset} attempt {attempt}: {e}. Retry in {wait}s")
             time.sleep(wait)
     raise RuntimeError(f"[{state}] Failed at offset={offset} after {MAX_RETRIES} attempts.")
@@ -183,21 +220,15 @@ def fetch_all_for_state(state: str) -> pd.DataFrame:
     offsets     = list(range(BATCH_SIZE, total, BATCH_SIZE))
     log.info(f"[{state}] {total:,} records across {1 + len(offsets)} pages")
 
-    if offsets:
-        def _fetch(off, idx, total_pages):
-            # Add random delay before each batch (except the first one which already happened)
-            if idx > 0:
-                random_batch_delay()
-            
-            result = fetch_page(state, off).get("records", [])
-            log.info(f"[{state}] Fetched batch {idx + 2}/{total_pages + 1} (offset {off})")
-            return result
-
-        with ThreadPoolExecutor(max_workers=MAX_PAGE_WORKERS) as pool:
-            futures = {pool.submit(_fetch, off, idx, len(offsets)): off 
-                      for idx, off in enumerate(offsets)}
-            for fut in as_completed(futures):
-                all_records.extend(fut.result())
+    # FIX 2: Delays moved OUTSIDE the thread pool, into a plain sequential loop.
+    # Previously, all futures were submitted at once and each slept inside the
+    # thread — causing delays to stack up before any page was actually fetched.
+    # Now we just loop, delay, fetch, repeat — simple and predictable.
+    for idx, off in enumerate(offsets):
+        random_batch_delay()
+        records = fetch_page(state, off).get("records", [])
+        all_records.extend(records)
+        log.info(f"[{state}] Fetched page {idx + 2}/{1 + len(offsets)} (offset {off})")
 
     return pd.DataFrame(all_records)
 
@@ -206,16 +237,15 @@ def fetch_all_for_state(state: str) -> pd.DataFrame:
 def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> list:
     df = fetch_all_for_state(state)
     if df.empty:
+        log.info(f"[{state}] No records returned from API.")
         return []
 
-    # Try Activities column first (nested NIC codes), fall back to flat NIC column
-    activities_col = next((c for c in df.columns if 'activit' in c.lower()), None)
-    nic_col        = next((c for c in df.columns if 'nic' in c.lower()), None)
+    # FIX 1: Use robust column detection instead of fragile single-keyword match
+    activities_col, flat_nic_col = detect_nic_columns(df)
 
     results = []
 
     if activities_col:
-        # Activities column contains a JSON array of NIC codes per enterprise
         for _, row in df.iterrows():
             raw = row.get(activities_col, "[]")
             try:
@@ -226,8 +256,15 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
             for activity in activities:
                 if not isinstance(activity, dict):
                     continue
-                nic_code = str(activity.get("NIC5DigitId", "")).strip()
-                if nic_code not in nic_set:
+                # Try multiple known key names for NIC code inside the activity object
+                nic_code = (
+                    str(activity.get("NIC5DigitId", "") or
+                        activity.get("NIC5DigitCode", "") or
+                        activity.get("nic5digitid", "") or
+                        activity.get("NICCode", "") or
+                        "").strip()
+                )
+                if not nic_code or nic_code not in nic_set:
                     continue
                 results.append({
                     "State":           str(row.get("State", state)).strip().title(),
@@ -239,12 +276,11 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
                     "Category":        cat_map.get(nic_code, "Uncategorised"),
                 })
 
-    elif nic_col:
-        # Flat NIC code column — simpler format
-        df[nic_col] = df[nic_col].astype(str).str.strip()
-        filtered    = df[df[nic_col].isin(nic_set)].copy()
+    elif flat_nic_col:
+        df[flat_nic_col] = df[flat_nic_col].astype(str).str.strip()
+        filtered = df[df[flat_nic_col].isin(nic_set)].copy()
         for _, row in filtered.iterrows():
-            nic_code = str(row.get(nic_col, "")).strip()
+            nic_code = str(row.get(flat_nic_col, "")).strip()
             results.append({
                 "State":           str(row.get("State", state)).strip().title(),
                 "District":        str(row.get("District", "")).strip().title(),
@@ -256,7 +292,13 @@ def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> li
             })
 
     else:
-        log.warning(f"[{state}] No NIC code column found. Skipping.")
+        # FIX 1: Instead of silently returning [], log a clear actionable error
+        # showing exactly what columns the API sent back.
+        log.error(
+            f"[{state}] Could not find a NIC code column. "
+            f"API returned these columns: {list(df.columns)}. "
+            f"Update the keywords in find_column() to match one of these."
+        )
         return []
 
     log.info(f"[{state}] {len(results):,} matching rows (from {len(df):,} total)")
@@ -282,10 +324,9 @@ def main():
     nic_set, nic_desc = load_nic_codes()
     cat_map           = load_category_mapping()
 
-    # ── Resume from checkpoint if a previous run was interrupted ──────────────
-    checkpoint     = load_checkpoint()
-    completed_set  = set(checkpoint.get("completed", []))
-    failed_states  = list(checkpoint.get("failed", []))   # carry forward prior failures
+    checkpoint    = load_checkpoint()
+    completed_set = set(checkpoint.get("completed", []))
+    failed_states = list(checkpoint.get("failed", []))
 
     remaining = [s for s in STATES_AND_UTS if s not in completed_set]
     if len(remaining) < len(STATES_AND_UTS):
@@ -305,9 +346,7 @@ def main():
             else:
                 log.info(f"[{state}] No matching suppliers — skipping file.")
 
-            # ── Mark state as done and persist immediately ─────────────────
             completed_set.add(state)
-            # Remove from failed list if it previously failed and now succeeded
             failed_states = [s for s in failed_states if s != state]
             checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
             save_checkpoint(checkpoint)
@@ -316,7 +355,6 @@ def main():
             log.error(f"[{state}] FAILED: {e}")
             if state not in failed_states:
                 failed_states.append(state)
-            # Save updated failed list to checkpoint so we know what to re-run
             checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
             save_checkpoint(checkpoint)
 
@@ -333,7 +371,6 @@ def main():
             log.info(f"  - {s.title()}")
     else:
         log.info("All states completed successfully.")
-        # Only clear the checkpoint when everything succeeded (including no prior failures)
         if not (set(STATES_AND_UTS) - completed_set):
             clear_checkpoint()
 
