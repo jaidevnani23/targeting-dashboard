@@ -35,7 +35,7 @@ load_dotenv()
 API_KEY = os.getenv("DATA_GOV_API_KEY")
 if not API_KEY:
     raise EnvironmentError("DATA_GOV_API_KEY not set in environment or .env file")
-RESOURCE_ID  = "2c1fd4a5-67c7-4672-a2c6-a0a76c2f00da"
+RESOURCE_ID  = "8b68ae56-84cf-4728-a0a6-1be11028dea7"
 BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
 NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
