@@ -4,7 +4,7 @@ Product Discovery Script
 ========================
 Scrapes trending/bestselling products from Amazon India and Flipkart,
 compares against existing products in data/Demand_Excel_Filled.xlsx,
-reads supplier JSONs from data/suppliers/ to determine which states
+reads supplier CSVs from data/suppliers/ to determine which states
 have meaningful supplier presence for each product's NIC code,
 and outputs data/new_products_suggestions.json for your review.
 
@@ -155,7 +155,7 @@ def _keywords_from_description(desc: str) -> list:
 # ── SUPPLIER STATE ANALYSIS ───────────────────────────────────────────────────
 def load_supplier_counts_by_nic() -> dict:
     """
-    Reads all supplier JSON files from data/suppliers/ and builds:
+    Reads all supplier CSV files from data/suppliers/ and builds:
     {nic_code: {state: count}} — supplier count per state per NIC code.
     """
     nic_state_counts = defaultdict(lambda: defaultdict(int))
@@ -165,21 +165,20 @@ def load_supplier_counts_by_nic() -> dict:
         log.warning("State allocation will use floor guarantee only.")
         return {}
 
-    files = [f for f in os.listdir(SUPPLIERS_DIR) if f.endswith('.json')]
+    files = [f for f in os.listdir(SUPPLIERS_DIR) if f.endswith('.csv')]
     if not files:
-        log.warning("No supplier JSON files found. Run msme_supplier_fetcher.py first.")
+        log.warning("No supplier CSV files found. Run msme_supplier_fetcher.py first.")
         return {}
 
     log.info(f"Reading {len(files)} supplier state files...")
     for fname in files:
         path = os.path.join(SUPPLIERS_DIR, fname)
         try:
-            with open(path, encoding="utf-8") as f:
-                records = json.load(f)
-            for record in records:
+            df = pd.read_csv(path, dtype=str)
+            for _, record in df.iterrows():
                 nic_code = str(record.get("NIC_Code", "")).strip()
                 state    = str(record.get("State", "")).strip().title()
-                if nic_code and state:
+                if nic_code and state and nic_code != 'nan' and state != 'nan':
                     nic_state_counts[nic_code][state] += 1
         except Exception as e:
             log.warning(f"Could not read {fname}: {e}")
@@ -306,7 +305,7 @@ def discover_new_products(cat_data: dict, existing: set,
             log.info(f"  '{keyword}'")
             amazon_products   = scrape_amazon(keyword)
             random_scrape_delay()  # Randomized delay after Amazon scrape
-            
+
             flipkart_products = scrape_flipkart(keyword)
             random_scrape_delay()  # Randomized delay after Flipkart scrape
 
@@ -336,7 +335,7 @@ def discover_new_products(cat_data: dict, existing: set,
 
         suggestions.extend(found[:MAX_PER_CATEGORY])
         log.info(f"  Found {len(found)} new products for {category}")
-        
+
         # Add delay between categories (except after the last one)
         if category_num < total_categories:
             random_category_delay()
@@ -351,10 +350,10 @@ def main():
     log.info(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
     log.info("=" * 60)
 
-    existing              = load_existing_products()
+    existing               = load_existing_products()
     nic_lookup, cat_lookup = load_nic_reference()
-    cat_data              = load_categories_and_keywords(nic_lookup, cat_lookup)
-    nic_state_counts      = load_supplier_counts_by_nic()
+    cat_data               = load_categories_and_keywords(nic_lookup, cat_lookup)
+    nic_state_counts       = load_supplier_counts_by_nic()
 
     log.info(f"Existing products : {len(existing)}")
     log.info(f"Categories        : {len(cat_data)}")
