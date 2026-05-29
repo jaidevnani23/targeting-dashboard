@@ -304,8 +304,10 @@ function getPeakMonths(row) {
     if (m) monthCount[m] = (monthCount[m] || 0) + 1;
   }
 
-  // Only months that recur ≥ PEAK_MIN_OCCURRENCES times, in calendar order
-  return MONTH_NAMES.filter(m => (monthCount[m] || 0) >= PEAK_MIN_OCCURRENCES);
+ // Try threshold 4+; fall back to 3+ if no month qualifies
+ const primary = MONTH_NAMES.filter(m => (monthCount[m] || 0) >= PEAK_MIN_OCCURRENCES);
+ if (primary.length > 0) return primary;
+ return MONTH_NAMES.filter(m => (monthCount[m] || 0) >= 3);
 }
 
 // ── AUTO-LOAD FROM REPO ───────────────────────────────────────────────────────
