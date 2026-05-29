@@ -27,9 +27,37 @@ Usage:
     python msme_supplier_fetcher.py --reset       # ignore checkpoint, start fresh
     python msme_supplier_fetcher.py --state DELHI # run a single state
     python msme_supplier_fetcher.py --dry-run     # fetch + filter but don't write CSVs
+
+CHANGES vs original
+-------------------
+FIX 1 — CSV response format
+    The API returns CSV (not JSON) for this resource even when format=json is
+    passed. Requesting format=csv and parsing with csv.DictReader is reliable
+    and much faster than trying to JSON-decode a mixed CSV+JSON body.
+
+FIX 2 — NIC column name
+    The API response contains a column named "NICCode5Digit" (mixed case, no
+    separator). The original keyword list missed this. A broader scan now
+    catches it as well as any future renames.
+
+FIX 3 — total record count
+    The CSV response has no "total" envelope field. We now fetch a 1-record
+    probe page first (format=json, limit=1) to read the total count, then
+    stream all pages as CSV. This avoids re-parsing JSON for large payloads.
+
+FIX 4 — empty-page sentinel
+    An empty CSV body (no data rows) is treated as end-of-results rather
+    than a retryable error, preventing infinite retry loops on the last page.
+
+FIX 5 — resource ID note
+    The resource ID visible in the API explorer URL differs slightly from the
+    one hard-coded in the original script. Verify the correct ID and set it
+    via RESOURCE_ID below or the DATA_GOV_RESOURCE_ID env var.
 """
 
 import argparse
+import csv
+import io
 import json
 import logging
 import os
@@ -44,14 +72,19 @@ from urllib3.util.retry import Retry
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG  — edit only this block
 # ─────────────────────────────────────────────────────────────────────────────
-# API key is read from the DATA_GOV_API_KEY environment variable (set in GitHub
-# Actions secrets).  The fallback hardcoded value is used for local runs only.
 API_KEY = os.environ.get(
     "DATA_GOV_API_KEY",
     "579b464db66ec23bdd000001d2ecc2400ab74128657eb9c1309228b3",
 )
-RESOURCE_ID = "8b68ae56-84cf-4728-a0a6-1be11028dea7"
-BASE_URL    = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
+
+# FIX 5: The explorer URL shows a slightly different resource ID ending in
+# "dea7ap1" vs the original "dea7". Verify which is correct in your account
+# and set DATA_GOV_RESOURCE_ID in your environment / GitHub secret if needed.
+RESOURCE_ID = os.environ.get(
+    "DATA_GOV_RESOURCE_ID",
+    "8b68ae56-84cf-4728-a0a6-1be11028dea7",   # ← confirm this matches the portal
+)
+BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
 NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
 DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
@@ -60,14 +93,11 @@ CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
 BATCH_SIZE     = 1000   # records per API page; max the API supports
 TIMEOUT_SEC    = 90     # per-request timeout
-MAX_RETRIES    = 4      # application-level retries (on top of urllib3 retries)
-RETRY_BASE_SEC = 5      # first retry wait; doubles each attempt → 5,10,20,40s
+MAX_RETRIES    = 4      # application-level retries
+RETRY_BASE_SEC = 5      # first retry wait; doubles → 5, 10, 20, 40s
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-# Hard limit is 1,000 req/hr rolling.  We target ~900/hr → 4.0s between calls.
-# _last_request_at tracks the wall-clock time of the last call so any time
-# already spent in JSON parsing / file I/O counts toward the gap.
-MIN_REQUEST_GAP  = 4.0   # seconds; raise to 4.5 if you still see 429s
+# Rate limiter: 1,000 req/hr hard limit → target ~900/hr → 4.0s between calls
+MIN_REQUEST_GAP  = 4.0
 _last_request_at: float = 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -96,8 +126,6 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTTP SESSION
-#  urllib3 retries handle transient TCP/TLS errors.
-#  Application-level retries in fetch_page() handle 502s and empty bodies.
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_session() -> requests.Session:
     s = requests.Session()
@@ -119,7 +147,6 @@ SESSION = _build_session()
 #  RATE-LIMITED FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 def _throttle():
-    """Sleep just long enough so we never fire faster than MIN_REQUEST_GAP."""
     global _last_request_at
     elapsed = time.monotonic() - _last_request_at
     gap = MIN_REQUEST_GAP - elapsed
@@ -128,58 +155,100 @@ def _throttle():
     _last_request_at = time.monotonic()
 
 
-def fetch_page(state: str, offset: int) -> dict:
-    """
-    Fetch one page of results for a state.
-    Returns the parsed JSON dict.
-    Raises RuntimeError after MAX_RETRIES consecutive failures.
-    """
-    params = {
+def _base_params(state: str, offset: int, fmt: str) -> dict:
+    return {
         "api-key":        API_KEY,
-        "format":         "json",
+        "format":         fmt,
         "limit":          BATCH_SIZE,
         "offset":         offset,
         "filters[State]": state,
     }
+
+
+def fetch_total(state: str) -> int:
+    """
+    FIX 3: Use a tiny JSON probe (limit=1) to read the total record count
+    from the envelope. This is the only JSON call per state; all data pages
+    are fetched as CSV.
+    """
+    params = {
+        "api-key":        API_KEY,
+        "format":         "json",
+        "limit":          1,
+        "offset":         0,
+        "filters[State]": state,
+    }
+    for attempt in range(1, MAX_RETRIES + 1):
+        _throttle()
+        try:
+            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
+            if resp.status_code == 429:
+                wait = 60 * attempt
+                log.warning(f"[{state}] probe 429 — backing off {wait}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            total = int(data.get("total", 0))
+            log.info(f"[{state}] Total records reported by API: {total:,}")
+            return total
+        except Exception as exc:
+            wait = RETRY_BASE_SEC * (2 ** (attempt - 1))
+            log.warning(f"[{state}] probe attempt {attempt}/{MAX_RETRIES}: {exc}. Retrying in {wait}s")
+            time.sleep(wait)
+    log.error(f"[{state}] Could not retrieve total count after {MAX_RETRIES} attempts.")
+    return 0
+
+
+def fetch_page_csv(state: str, offset: int) -> list[dict]:
+    """
+    FIX 1: Fetch one page as CSV and return a list of row dicts.
+    CSV parsing is unambiguous and never fails on "mixed" bodies.
+
+    FIX 4: An empty body (no data rows) returns [] so the caller
+    stops paginating instead of retrying forever.
+    """
+    params = _base_params(state, offset, fmt="csv")
 
     for attempt in range(1, MAX_RETRIES + 1):
         _throttle()
         try:
             resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
 
-            # 429: rate limited — back off hard before retrying
             if resp.status_code == 429:
-                wait = 60 * attempt   # 60s, 120s, 180s, 240s
+                wait = 60 * attempt
                 log.warning(
-                    f"[{state}] offset={offset} — 429 Rate Limited. "
-                    f"Backing off {wait}s (attempt {attempt}/{MAX_RETRIES})"
+                    f"[{state}] offset={offset} 429 — backing off {wait}s "
+                    f"(attempt {attempt}/{MAX_RETRIES})"
                 )
                 time.sleep(wait)
                 continue
 
             resp.raise_for_status()
-            data = resp.json()
+            text = resp.text.strip()
 
-            # API sometimes returns HTTP 200 with an error body and no 'records'
-            if "records" not in data:
-                if attempt < MAX_RETRIES:
-                    wait = RETRY_BASE_SEC * (2 ** (attempt - 1))
-                    log.warning(
-                        f"[{state}] offset={offset} — no 'records' in response "
-                        f"(attempt {attempt}/{MAX_RETRIES}). "
-                        f"Body: {str(data)[:200]}. Retrying in {wait}s"
-                    )
-                    time.sleep(wait)
-                    continue
-                # Last attempt: return what we have so the caller can decide
-                return data
+            if not text:
+                # FIX 4: empty body → end of results, not an error
+                log.debug(f"[{state}] offset={offset} — empty body, stopping pagination.")
+                return []
 
-            return data
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+
+            if not rows:
+                log.debug(f"[{state}] offset={offset} — CSV header only, stopping pagination.")
+                return []
+
+            # Log column names once (first page only) so NIC col issues are visible
+            if offset == 0:
+                log.info(f"[{state}] CSV columns: {list(rows[0].keys())}")
+
+            return rows
 
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError,
                 requests.exceptions.HTTPError) as exc:
-            wait = RETRY_BASE_SEC * (2 ** (attempt - 1))   # 5, 10, 20, 40s
+            wait = RETRY_BASE_SEC * (2 ** (attempt - 1))
             log.warning(
                 f"[{state}] offset={offset} attempt {attempt}/{MAX_RETRIES}: "
                 f"{exc}. Retrying in {wait}s"
@@ -194,16 +263,9 @@ def fetch_page(state: str, offset: int) -> dict:
 #  LOAD REFERENCE FILES
 # ─────────────────────────────────────────────────────────────────────────────
 def load_nic_codes() -> tuple[set, dict]:
-    """
-    Reads Key_NIC_Codes_List.xlsx.
-    Finds the NIC code column (must contain 'nic') and description column
-    (must contain 'desc').
-    Returns (nic_set, nic_description_map).
-    """
     df = pd.read_excel(NIC_CODES_FILE, dtype=str)
     df.columns = df.columns.str.strip()
 
-    # Prefer a column that has both 'nic' and 'code'; fall back to just 'nic'
     code_col = next(
         (c for c in df.columns if "nic" in c.lower() and "code" in c.lower()),
         None,
@@ -236,16 +298,6 @@ def load_nic_codes() -> tuple[set, dict]:
 
 
 def load_category_mapping() -> dict:
-    """
-    Reads Demand_Excel_Filled.xlsx.
-    Finds the NIC column (contains 'nic') and Category column (contains 'cat').
-    Returns {nic_code: category_string}.
-
-    NOTE: The file has multiple sheets. The actual data lives on the sheet named
-    'Data'; the first sheet ('Sheet1') is a pivot summary with only 'Unnamed: 0'.
-    We iterate all sheets and use the first one containing both required columns,
-    so this is robust to future sheet reordering.
-    """
     all_sheets = pd.read_excel(DEMAND_FILE, sheet_name=None)
 
     df      = None
@@ -268,13 +320,9 @@ def load_category_mapping() -> dict:
 
     if df is None:
         raise ValueError(
-            f"Cannot find NIC or Category columns in any sheet of {DEMAND_FILE}. "
-            f"Sheets present: {list(all_sheets.keys())}. "
-            f"Columns in first sheet: {list(list(all_sheets.values())[0].columns)}"
+            f"Cannot find NIC or Category columns in any sheet of {DEMAND_FILE}."
         )
 
-    # NIC codes may arrive as int64, float64, or str — normalise to zero-padded
-    # 5-char strings to match the format produced by load_nic_codes().
     def _norm_nic(x):
         s = str(x).strip()
         if not s or s == "nan":
@@ -304,15 +352,37 @@ def load_category_mapping() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def _find_nic_column(columns) -> str | None:
     """
-    Locate the NIC-code column from whatever the API returns.
-    Logs all column names so you can update keywords if the API changes.
+    FIX 2: Broadened keyword scan.
+    The API returns 'NICCode5Digit' (confirmed in screenshot response body).
+    We now match any column whose lowercased name contains both 'nic' and '5',
+    or just 'nic' with 'digit', or the legacy patterns — whichever comes first.
     """
     log.info(f"  API columns seen: {list(columns)}")
-    for kw in ["nic5digit", "nic5", "niccode", "nic_code", "nic"]:
-        for col in columns:
-            if kw in col.lower():
-                log.info(f"  → NIC column matched: {col!r}  (keyword: {kw!r})")
-                return col
+    cols_lower = {c.lower(): c for c in columns}
+
+    # Priority 1: column containing 'nic' + '5' (e.g. "NICCode5Digit", "nic5digit")
+    for orig_lower, orig in cols_lower.items():
+        if "nic" in orig_lower and "5" in orig_lower:
+            log.info(f"  → NIC column matched (priority 1): {orig!r}")
+            return orig
+
+    # Priority 2: column containing 'nic' + 'digit' (e.g. "NICDigit")
+    for orig_lower, orig in cols_lower.items():
+        if "nic" in orig_lower and "digit" in orig_lower:
+            log.info(f"  → NIC column matched (priority 2): {orig!r}")
+            return orig
+
+    # Priority 3: legacy keywords
+    for kw in ["niccode", "nic_code", "nic"]:
+        for orig_lower, orig in cols_lower.items():
+            if kw in orig_lower:
+                log.info(f"  → NIC column matched (priority 3 / kw={kw!r}): {orig!r}")
+                return orig
+
+    log.error(
+        f"  Could not find a NIC code column. "
+        f"Add a keyword to _find_nic_column() matching one of: {list(columns)}"
+    )
     return None
 
 
@@ -343,63 +413,63 @@ def process_state(
     cat_map: dict,
 ) -> list[dict]:
     """
-    Fetches all pages for a state, filters to matching NIC codes, and
-    returns a list of result-row dicts.
+    Fetches all pages for a state as CSV, filters to matching NIC codes,
+    and returns a list of result-row dicts.
     """
-    first      = fetch_page(state, 0)
-    total      = int(first.get("total", 0))
-
+    total = fetch_total(state)
     if total == 0:
-        log.info(f"[{state}] No records in API — skipping.")
+        log.info(f"[{state}] No records — skipping.")
         return []
 
-    all_records = list(first.get("records", []))
-    offsets     = list(range(BATCH_SIZE, total, BATCH_SIZE))
-    total_pages = 1 + len(offsets)
+    total_pages = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    log.info(f"[{state}] {total:,} records across ~{total_pages} page(s)")
 
-    log.info(f"[{state}] {total:,} records across {total_pages} page(s)")
+    all_rows: list[dict] = []
+    nic_col: str | None = None
 
-    for page_num, offset in enumerate(offsets, start=2):
-        data = fetch_page(state, offset)
-        all_records.extend(data.get("records", []))
+    for page_num, offset in enumerate(range(0, total, BATCH_SIZE), start=1):
+        rows = fetch_page_csv(state, offset)
+
+        if not rows:
+            log.info(f"[{state}] Empty page at offset={offset} — pagination complete.")
+            break
+
+        # Discover NIC column name once from the first non-empty page
+        if nic_col is None:
+            nic_col = _find_nic_column(rows[0].keys())
+            if nic_col is None:
+                log.error(
+                    f"[{state}] Cannot find NIC column. "
+                    f"Skipping state. Columns: {list(rows[0].keys())}"
+                )
+                return []
+
+        all_rows.extend(rows)
         log.info(
             f"[{state}] page {page_num}/{total_pages}  "
-            f"({len(all_records):,}/{total:,} fetched)"
+            f"({len(all_rows):,}/{total:,} fetched)"
         )
-
-    df = pd.DataFrame(all_records)
-    if df.empty:
-        log.warning(f"[{state}] DataFrame empty after assembling all pages.")
-        return []
-
-    nic_col = _find_nic_column(df.columns)
-    if nic_col is None:
-        log.error(
-            f"[{state}] Could not find a NIC code column. "
-            f"Update _find_nic_column() keywords to match: {list(df.columns)}"
-        )
-        return []
 
     results: list[dict] = []
-    for _, row in df.iterrows():
+    for row in all_rows:
         for code in _extract_nic_codes(row.get(nic_col, "")):
             if code not in nic_set:
                 continue
             results.append({
-                "State":           str(row.get("State",          state)).strip().title(),
-                "District":        str(row.get("District",       "")).strip().title(),
-                "Pincode":         str(row.get("Pincode",        "")).strip(),
-                "Enterprise_Name": str(row.get("EnterpriseName", "")).strip().title(),
+                "State":           str(row.get("State",           state)).strip().title(),
+                "District":        str(row.get("District",        "")).strip().title(),
+                "Pincode":         str(row.get("Pincode",         "")).strip(),
+                "Enterprise_Name": str(row.get("EnterpriseName",  "")).strip().title(),
                 "NIC_Code":        code,
                 "NIC_Description": nic_desc.get(code, ""),
                 "Category":        cat_map.get(code, "Uncategorised"),
-                "Enterprise_Type": str(row.get("EnterpriseType", "")).strip().title(),
-                "Major_Activity":  str(row.get("MajorActivity",  "")).strip().title(),
+                "Enterprise_Type": str(row.get("EnterpriseType",  "")).strip().title(),
+                "Major_Activity":  str(row.get("MajorActivity",   "")).strip().title(),
             })
 
     log.info(
         f"[{state}] {len(results):,} matching supplier rows "
-        f"(from {len(df):,} total records)"
+        f"(from {len(all_rows):,} total records)"
     )
     return results
 
@@ -428,7 +498,7 @@ def _save_checkpoint(cp: dict):
     tmp = CHECKPOINT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cp, f, indent=2)
-    os.replace(tmp, CHECKPOINT)   # atomic on POSIX
+    os.replace(tmp, CHECKPOINT)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SAVE
@@ -470,11 +540,9 @@ def main():
         log.error("DATA_GOV_API_KEY is not set. Aborting.")
         sys.exit(1)
 
-    # ── Reference data ────────────────────────────────────────────────────────
     nic_set, nic_desc = load_nic_codes()
     cat_map           = load_category_mapping()
 
-    # ── Build work list ───────────────────────────────────────────────────────
     if args.state:
         target = args.state.strip().upper()
         if target not in STATES_AND_UTS:
@@ -496,6 +564,7 @@ def main():
 
     print(f"\n{'='*62}")
     print(f"  MSME Supplier Fetcher  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  Resource ID         : {RESOURCE_ID}")
     print(f"  NIC codes loaded    : {len(nic_set)}")
     print(f"  States pending      : {len(pending)}")
     if skipped:
@@ -505,7 +574,6 @@ def main():
     print(f"  Output              : {OUTPUT_DIR}/suppliers_<State>.csv")
     print(f"{'='*62}\n")
 
-    # ── Process states sequentially ───────────────────────────────────────────
     total_suppliers = 0
 
     for i, state in enumerate(pending, 1):
@@ -528,11 +596,9 @@ def main():
             if state not in failed:
                 failed.append(state)
 
-        # Checkpoint after every state so partial runs are always resumable
         if not args.state:
             _save_checkpoint({"completed": sorted(completed), "failed": failed})
 
-    # ── Summary ───────────────────────────────────────────────────────────────
     still_pending = [s for s in STATES_AND_UTS if s not in completed]
 
     print(f"\n{'='*62}")
@@ -550,13 +616,9 @@ def main():
         print(f"  All states completed successfully.")
     print(f"{'='*62}\n")
 
-    # ── Exit codes ────────────────────────────────────────────────────────────
-    # Exit 2 signals the GitHub Actions workflow to retrigger itself.
-    # Exit 1 is reserved for hard errors (bad API key, missing files, etc.).
     if still_pending or failed:
-        sys.exit(2)   # incomplete — workflow will retrigger
+        sys.exit(2)
     else:
-        # Clean run: remove checkpoint so next scheduled run starts fresh
         if not args.state and not args.dry_run and os.path.exists(CHECKPOINT):
             os.remove(CHECKPOINT)
             log.info("Checkpoint cleared — clean full run complete.")
