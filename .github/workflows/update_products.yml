@@ -2,14 +2,16 @@ name: Update Products
 
 on:
   schedule:
-    - cron: '0 8 1 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 8 AM UTC / 1:30 PM IST
+    - cron: '0 8 1 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 08:00 UTC / 13:30 IST
   workflow_dispatch:               # manual trigger
 
 jobs:
   update-products:
     name: Discover and Update Products
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # product_discovery.py runtime is unknown but bounded — 60 min is tight if
+    # it does any scraping. Raised to 90 min to give a real safety margin.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repo
@@ -29,19 +31,51 @@ jobs:
             ${{ runner.os }}-pip-products-
 
       - name: Install dependencies
-        run: pip install requests pandas openpyxl python-dotenv beautifulsoup4 lxml
+        # Keep beautifulsoup4 + lxml for product_discovery.py scraping.
+        run: pip install requests pandas openpyxl beautifulsoup4 lxml
 
       - name: Run product discovery
+        # Pass any API keys that product_discovery.py might need.
+        # Add further secrets here if the script requires them.
+        env:
+          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
         run: python product_discovery.py
 
       - name: Run product updater
-        run: python product_updater.py
+        # --yes skips the interactive "Proceed? (yes/no)" prompt that would
+        # otherwise hang the runner indefinitely waiting for TTY input.
+        # The CI env variable (always "true" on GitHub Actions) also triggers
+        # the same bypass as a safety net.
+        env:
+          CI: "true"
+        run: python product_updater.py --yes
+
+      - name: Verify output was produced
+        run: |
+          if [ ! -f "data/Demand_Excel_Filled.xlsx" ]; then
+            echo "::error::Demand_Excel_Filled.xlsx not found — product updater may have failed."
+            exit 1
+          fi
+          echo "Demand_Excel_Filled.xlsx present — OK"
 
       - name: Commit and push product data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --cached --quiet && echo "No changes to commit." || \
+
+          # Pull latest before push.
+          # The suppliers workflow also pushes to main on the same day (00:30 UTC),
+          # so a rebase is required to avoid a non-fast-forward rejection.
+          git pull --rebase origin main
+
+          # Stage only the files this workflow owns — not data/backups/ which
+          # would bloat the repo by one backup file every quarterly run.
+          git add data/Demand_Excel_Filled.xlsx
+          git add data/new_products_suggestions.json 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit — data is already up to date."
+          else
             git commit -m "chore(data): refresh product data [$(date -u +'%Y-%m-%d')]"
-          git push
+            git push
+          fi
