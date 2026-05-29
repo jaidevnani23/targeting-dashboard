@@ -54,7 +54,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main
-          git add data/suppliers/
+          git add data/suppliers/ ||true
           git diff --cached --quiet && echo "No changes to commit." || \
             git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
           git push
