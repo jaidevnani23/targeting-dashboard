@@ -240,20 +240,52 @@ def load_category_mapping() -> dict:
     Reads Demand_Excel_Filled.xlsx.
     Finds the NIC column (contains 'nic') and Category column (contains 'cat').
     Returns {nic_code: category_string}.
+
+    NOTE: The file has multiple sheets. The actual data lives on the sheet named
+    'Data'; the first sheet ('Sheet1') is a pivot summary with only 'Unnamed: 0'.
+    We iterate all sheets and use the first one containing both required columns,
+    so this is robust to future sheet reordering.
     """
-    df = pd.read_excel(DEMAND_FILE, dtype=str)
-    df.columns = df.columns.str.strip()
+    all_sheets = pd.read_excel(DEMAND_FILE, sheet_name=None)
 
-    nic_col = next((c for c in df.columns if "nic" in c.lower()), None)
-    cat_col = next((c for c in df.columns if "cat" in c.lower()), None)
+    df      = None
+    nic_col = None
+    cat_col = None
 
-    if nic_col is None or cat_col is None:
+    for sheet_name, sheet_df in all_sheets.items():
+        sheet_df.columns = sheet_df.columns.str.strip()
+        _nic = next((c for c in sheet_df.columns if "nic" in c.lower()), None)
+        _cat = next((c for c in sheet_df.columns if "cat" in c.lower()), None)
+        if _nic and _cat:
+            df      = sheet_df
+            nic_col = _nic
+            cat_col = _cat
+            log.info(
+                f"Category mapping: using sheet {sheet_name!r}  "
+                f"(cols: {nic_col!r}, {cat_col!r})"
+            )
+            break
+
+    if df is None:
         raise ValueError(
-            f"Cannot find NIC or Category columns in {DEMAND_FILE}. "
-            f"Columns present: {list(df.columns)}"
+            f"Cannot find NIC or Category columns in any sheet of {DEMAND_FILE}. "
+            f"Sheets present: {list(all_sheets.keys())}. "
+            f"Columns in first sheet: {list(list(all_sheets.values())[0].columns)}"
         )
 
-    df[nic_col] = df[nic_col].str.strip().str.zfill(5)
+    # NIC codes may arrive as int64, float64, or str — normalise to zero-padded
+    # 5-char strings to match the format produced by load_nic_codes().
+    def _norm_nic(x):
+        s = str(x).strip()
+        if not s or s == "nan":
+            return None
+        try:
+            return str(int(float(s))).zfill(5)
+        except (ValueError, OverflowError):
+            return None
+
+    df[nic_col] = df[nic_col].apply(_norm_nic)
+
     mapping = (
         df.dropna(subset=[nic_col, cat_col])
         .groupby(nic_col)[cat_col]
@@ -263,7 +295,7 @@ def load_category_mapping() -> dict:
 
     log.info(
         f"Loaded {len(mapping)} NIC→Category mappings from {DEMAND_FILE}  "
-        f"(cols: {nic_col!r}, {cat_col!r})"
+        f"(col: {nic_col!r})"
     )
     return mapping
 
