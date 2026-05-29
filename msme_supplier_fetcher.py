@@ -35,7 +35,7 @@ load_dotenv()
 API_KEY = os.getenv("DATA_GOV_API_KEY")
 if not API_KEY:
     raise EnvironmentError("DATA_GOV_API_KEY not set in environment or .env file")
-RESOURCE_ID  = "2c1fd4a5-67c7-4672-a2c6-a0a76c2f00da"
+RESOURCE_ID  = "list-msme-registered-units-under-udyam"
 BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
 NIC_CODES_FILE  = "data/Key_NIC_Codes_List.xlsx"
@@ -44,7 +44,7 @@ OUTPUT_DIR      = "data/suppliers"
 
 CHECKPOINT_FILE = "data/suppliers/fetch_checkpoint.json"
 
-BATCH_SIZE       = 1000
+BATCH_SIZE       = 100
 TIMEOUT_SEC      = 120
 MAX_RETRIES      = 5
 MIN_BATCH_DELAY  = 6.77585
