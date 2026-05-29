@@ -26,7 +26,6 @@ html { font-size: 13px; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--txt); min-height: 100vh; }
 .shell { max-width: 1600px; margin: 0 auto; padding: 16px; }
 
-/* Top bar */
 .topbar { display: flex; align-items: center; gap: 12px; background: var(--navy); color: #fff; padding: 12px 20px; border-radius: 10px 10px 0 0; }
 .topbar-title { font-size: 15px; font-weight: 700; flex: 1; }
 .topbar-title span { opacity: .6; font-weight: 400; font-size: 12px; margin-left: 8px; }
@@ -38,7 +37,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .refresh-btn.spinning svg { animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Controls */
 .ctrlbar { background: var(--white); border: 1px solid var(--bdr); border-top: none; padding: 10px 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .ctrl-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1; }
 select, input[type=text] { padding: 6px 10px; border: 1.5px solid var(--bdr); border-radius: 6px; font-size: 12px; color: var(--txt); background: var(--white); outline: none; transition: border-color .15s; }
@@ -46,7 +44,6 @@ select:focus, input[type=text]:focus { border-color: var(--blue); }
 input[type=text] { min-width: 190px; }
 .filter-label { font-size: 11px; font-weight: 600; color: var(--txt3); white-space: nowrap; }
 
-/* Upload */
 .upload-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .upload-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1.5px solid var(--bdr); background: var(--white); color: var(--txt2); cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
 .upload-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--white); }
@@ -57,13 +54,11 @@ input[type=text] { min-width: 190px; }
 
 [data-theme="dark"] .file-badge.trends { background: #3B2E5C; color: #C4B5FD; }
 
-/* Stats */
 .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px; background: var(--bdr); border: 1px solid var(--bdr); border-top: none; }
 .stat-cell { background: var(--white); padding: 14px 16px; }
 .stat-val { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1; }
 .stat-lbl { font-size: 10px; font-weight: 600; color: var(--txt3); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
 
-/* Table */
 .table-wrap { background: var(--white); border: 1px solid var(--bdr); border-top: none; border-radius: 0 0 10px 10px; overflow: hidden; }
 .table-scroll { overflow-x: auto; max-height: 62vh; overflow-y: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -78,13 +73,11 @@ td.peak-cell { white-space: normal; max-width: 220px; }
 tbody tr:nth-child(even) td { background: var(--row-alt); }
 tbody tr:hover td { background: #EEF3FB !important; }
 
-/* Trend tags */
 .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .tag-rising { background: var(--green-lt); color: var(--green); }
 .tag-stable { background: var(--blue-lt); color: var(--blue); }
 .tag-declining { background: var(--amber-lt); color: var(--amber); }
 
-/* Peak month pills */
 .peak-pills { display: flex; flex-wrap: wrap; gap: 3px; }
 .pill {
   display: inline-block; padding: 1px 6px; border-radius: 3px;
@@ -93,7 +86,6 @@ tbody tr:hover td { background: #EEF3FB !important; }
 }
 .pill-none { color: var(--txt4); font-size: 11px; font-style: italic; }
 
-/* Pagination */
 .pagebar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid var(--bdr); background: #FAFBFD; }
 .pagebar-info { font-size: 11px; color: var(--txt3); }
 .page-btns { display: flex; gap: 4px; }
@@ -110,7 +102,6 @@ tbody tr:hover td { background: #EEF3FB !important; }
 .spinner { width: 36px; height: 36px; border: 3px solid var(--bdr); border-top-color: var(--blue); border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 12px; }
 .loading-msg { font-size: 13px; color: var(--txt3); font-weight: 500; }
 
-/* Dark mode toggle */
 .dark-mode-toggle { 
   position: fixed; 
   bottom: 20px; 
@@ -137,9 +128,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
   border-color: var(--blue);
   color: var(--blue);
 }
-.dark-mode-toggle:active { 
-  transform: translateY(0); 
-}
+.dark-mode-toggle:active { transform: translateY(0); }
 
 [data-theme="dark"] .loading-overlay { background: rgba(0,0,0,.9); }
 [data-theme="dark"] th { background: #262626; }
@@ -204,10 +193,10 @@ tbody tr:hover td { background: #EEF3FB !important; }
   </div>
 
   <div class="stats-row">
-    <div class="stat-cell"><div class="stat-val" id="stat-total">0</div><div class="stat-lbl">Total Rows</div></div>
-    <div class="stat-cell"><div class="stat-val" id="stat-filtered">0</div><div class="stat-lbl">Filtered Rows</div></div>
-    <div class="stat-cell"><div class="stat-val" id="stat-extra1">0</div><div class="stat-lbl" id="stat-extra1-lbl">—</div></div>
-    <div class="stat-cell"><div class="stat-val" id="stat-extra2">0</div><div class="stat-lbl" id="stat-extra2-lbl">—</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-total">0</div><div class="stat-lbl" id="stat-total-lbl">Total Products</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-filtered">0</div><div class="stat-lbl" id="stat-filtered-lbl">Selected Products</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-extra1">0</div><div class="stat-lbl" id="stat-extra1-lbl">Total Categories</div></div>
+    <div class="stat-cell"><div class="stat-val" id="stat-extra2">0</div><div class="stat-lbl" id="stat-extra2-lbl">Selected Categories</div></div>
     <div class="stat-cell"><div class="stat-val" id="stat-extra3">0</div><div class="stat-lbl" id="stat-extra3-lbl">—</div></div>
   </div>
 
@@ -236,16 +225,14 @@ tbody tr:hover td { background: #EEF3FB !important; }
 </div>
 
 <script>
-// ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const MONTH_NAMES   = ['January','February','March','April','May','June',
                        'July','August','September','October','November','December'];
-const PEAK_MIN_OCCURRENCES = 4; // a month must appear in ≥ this many of a product's own 20 Top_N slots
-const TOP_N         = 20;      // number of Top_N_Month columns to inspect
+const PEAK_MIN_OCCURRENCES = 4;
+const TOP_N         = 20;
 
-// ── STATE ─────────────────────────────────────────────────────────────────────
 let demandData      = [];
 let supplyData      = [];
-let trendsMap       = {};  // NIC code → Category
+let trendsMap       = {};
 let filteredData    = [];
 let currentSide     = 'demand';
 let currentPage     = 1;
@@ -253,13 +240,6 @@ let sortCol         = null;
 let sortDir         = 1;
 const PAGE_SIZE     = 50;
 
-// ── PEAK MONTHS LOGIC ─────────────────────────────────────────────────────────
-
-/**
- * Normalise a Top_N_Month value to a full month name.
- * Accepts 'YYYY-MM' (e.g. '2024-03') or a plain name (e.g. 'March').
- * Returns null if the value is empty or unrecognisable.
- */
 function normaliseMonthName(val) {
   if (!val) return null;
   const s = String(val).trim();
@@ -274,19 +254,7 @@ function normaliseMonthName(val) {
   return full || null;
 }
 
-/**
- * Return the peak months for a single product row, sorted by calendar order.
- *
- * A month qualifies if it appears in ≥ PEAK_MIN_OCCURRENCES of this row's own
- * Top_1_Month … Top_20_Month slots. Because each slot is a YYYY-MM date, the
- * same calendar month can appear across multiple years (2022-07, 2023-07 …).
- * We count those raw occurrences — repetition across years is exactly what
- * signals a seasonal peak for that specific product.
- *
- * If the scraper already wrote a Peak_Months column, we use that directly.
- */
 function getPeakMonths(row) {
-  // Fast path: scraper pre-computed column present
   const precomputed = row['Peak_Months'];
   if (precomputed && String(precomputed).trim()) {
     return String(precomputed)
@@ -296,21 +264,16 @@ function getPeakMonths(row) {
       .filter((m, i, a) => a.indexOf(m) === i)
       .sort((a, b) => MONTH_NAMES.indexOf(a) - MONTH_NAMES.indexOf(b));
   }
-
-  // Count raw occurrences of each calendar month across all 20 slots
   const monthCount = {};
   for (let i = 1; i <= TOP_N; i++) {
     const m = normaliseMonthName(row[`Top_${i}_Month`]);
     if (m) monthCount[m] = (monthCount[m] || 0) + 1;
   }
-
- // Try threshold 4+; fall back to 3+ if no month qualifies
- const primary = MONTH_NAMES.filter(m => (monthCount[m] || 0) >= PEAK_MIN_OCCURRENCES);
- if (primary.length > 0) return primary;
- return MONTH_NAMES.filter(m => (monthCount[m] || 0) >= 3);
+  const primary = MONTH_NAMES.filter(m => (monthCount[m] || 0) >= PEAK_MIN_OCCURRENCES);
+  if (primary.length > 0) return primary;
+  return MONTH_NAMES.filter(m => (monthCount[m] || 0) >= 3);
 }
 
-// ── AUTO-LOAD FROM REPO ───────────────────────────────────────────────────────
 async function autoLoadTrendsFromRepo() {
   const JSON_URL = 'https://raw.githubusercontent.com/jaidevnani23/targeting-dashboard/main/data/dashboard_trends_data.json';
   try {
@@ -319,7 +282,6 @@ async function autoLoadTrendsFromRepo() {
     const json = await res.json();
     setDemandData(Array.isArray(json) ? json : (json.rows || json.demand_adjustments || []));
 
-    // Build NIC → Category map for supply side enrichment
     trendsMap = {};
     demandData.forEach(row => {
       const nic = row['NIC Code'] || row['NIC_Code'] || row['NICCode'];
@@ -342,12 +304,10 @@ async function autoLoadTrendsFromRepo() {
 
 window.addEventListener('DOMContentLoaded', autoLoadTrendsFromRepo);
 
-// ── DEMAND DATA SETTER ────────────────────────────────────────────────────────
 function setDemandData(rows) {
   demandData = rows;
 }
 
-// ── FILE UPLOAD ───────────────────────────────────────────────────────────────
 function handleUpload(type) {
   const input = document.getElementById(`${type}-upload`);
   const file  = input.files[0];
@@ -355,7 +315,6 @@ function handleUpload(type) {
 
   showLoading(`Reading ${type} file…`);
 
-  // JSON files (demand/trends side only)
   if (file.name.endsWith('.json')) {
     const reader = new FileReader();
     reader.onload = e => {
@@ -386,7 +345,6 @@ function handleUpload(type) {
     return;
   }
 
-  // Excel / CSV files
   const reader = new FileReader();
   reader.onload = e => {
     try {
@@ -424,7 +382,6 @@ function handleUpload(type) {
   reader.readAsBinaryString(file);
 }
 
-// ── SUPPLY ENRICHMENT ─────────────────────────────────────────────────────────
 function enrichSupplyWithCategory(row) {
   const nicCode = row['NIC_Code'] || row['NIC Code'] || row['NICCode'];
   if (nicCode && trendsMap[String(nicCode)]) {
@@ -433,7 +390,6 @@ function enrichSupplyWithCategory(row) {
   return row;
 }
 
-// ── DOWNLOAD ──────────────────────────────────────────────────────────────────
 function downloadFiltered() {
   if (filteredData.length === 0) {
     alert('No data to download. Please apply filters or upload data first.');
@@ -454,7 +410,6 @@ function downloadFiltered() {
   }
 }
 
-// ── SIDE SWITCH ───────────────────────────────────────────────────────────────
 function switchSide(side) {
   currentSide = side;
   currentPage = 1;
@@ -466,7 +421,11 @@ function switchSide(side) {
   applyFilters();
 }
 
-// ── FILTERS ───────────────────────────────────────────────────────────────────
+// ── DYNAMIC CASCADING FILTERS ─────────────────────────────────────────────────
+// Build filter options restricted to what's valid given earlier selections.
+// For demand: state → category → trend → peak month (each narrows the next).
+// For supply: state → district → category → NIC code.
+
 function applyFilters() {
   const all = currentSide === 'demand' ? demandData : supplyData;
   let data  = [...all];
@@ -485,7 +444,6 @@ function applyFilters() {
     if (state)    data = data.filter(r => r['State'] === state);
     if (category) data = data.filter(r => r['Category'] === category);
     if (trend)    data = data.filter(r => (r['Trend_Direction']||'').includes(trend));
-    // Peak month filter: row must have this month as one of its qualifying peaks
     if (peak)     data = data.filter(r => getPeakMonths(r).includes(peak));
   } else {
     const search   = document.getElementById('s-search').value.toLowerCase();
@@ -517,43 +475,68 @@ function applyFilters() {
   currentPage  = 1;
   renderTable();
   updateStats();
-  buildFilterOptions();
+  buildFilterOptions();  // rebuild dropdowns based on current selections
 }
 
-// ── FILTER DROPDOWNS ──────────────────────────────────────────────────────────
+// ── CASCADING DROPDOWN BUILDER ────────────────────────────────────────────────
 function buildFilterOptions() {
   const all = currentSide === 'demand' ? demandData : supplyData;
 
   if (currentSide === 'demand') {
-    const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
-    const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
-    // Peak month dropdown: union of all qualifying peak months across all rows
-    const peakSet = new Set(all.flatMap(r => getPeakMonths(r)));
-    const peaks   = MONTH_NAMES.filter(m => peakSet.has(m));
+    const state    = document.getElementById('d-state').value;
+    const category = document.getElementById('d-category').value;
+    const trend    = document.getElementById('d-trend').value;
+    const peak     = document.getElementById('d-peakmonth').value;
 
-    fillSelect('d-state', states);
-    fillSelect('d-category', categories);
-    fillSelect('d-peakmonth', peaks);
+    // States: unrestricted (always show all states)
+    const states = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
+    fillSelect('d-state', states, state);
+
+    // Categories: restricted to rows matching the selected state
+    let afterState = state ? all.filter(r => r['State'] === state) : all;
+    const categories = [...new Set(afterState.map(r => r['Category']).filter(Boolean))].sort();
+    fillSelect('d-category', categories, category);
+
+    // Peak months: restricted to rows matching state + category + trend
+    let afterCat = category ? afterState.filter(r => r['Category'] === category) : afterState;
+    let afterTrend = trend ? afterCat.filter(r => (r['Trend_Direction']||'').includes(trend)) : afterCat;
+    const peakSet = new Set(afterTrend.flatMap(r => getPeakMonths(r)));
+    const peaks = MONTH_NAMES.filter(m => peakSet.has(m));
+    fillSelect('d-peakmonth', peaks, peak);
+
   } else {
-    const states     = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
-    const districts  = [...new Set(all.map(r => r['District']).filter(Boolean))].sort();
-    const categories = [...new Set(all.map(r => r['Category']).filter(Boolean))].sort();
-    const niccodes   = [...new Set(all.map(r => r['NIC_Code']).filter(Boolean).map(v => String(v)))].sort();
+    const state    = document.getElementById('s-state').value;
+    const district = document.getElementById('s-district').value;
+    const category = document.getElementById('s-category').value;
+    const niccode  = document.getElementById('s-niccode').value;
 
-    fillSelect('s-state', states);
-    fillSelect('s-district', districts);
-    fillSelect('s-category', categories);
-    fillSelect('s-niccode', niccodes);
+    // States: unrestricted
+    const states = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
+    fillSelect('s-state', states, state);
+
+    // Districts: restricted to selected state
+    let afterState = state ? all.filter(r => r['State'] === state) : all;
+    const districts = [...new Set(afterState.map(r => r['District']).filter(Boolean))].sort();
+    fillSelect('s-district', districts, district);
+
+    // Categories: restricted to state + district
+    let afterDistrict = district ? afterState.filter(r => r['District'] === district) : afterState;
+    const categories = [...new Set(afterDistrict.map(r => r['Category']).filter(Boolean))].sort();
+    fillSelect('s-category', categories, category);
+
+    // NIC codes: restricted to state + district + category
+    let afterCat = category ? afterDistrict.filter(r => r['Category'] === category) : afterDistrict;
+    const niccodes = [...new Set(afterCat.map(r => r['NIC_Code']).filter(Boolean).map(v => String(v)))].sort();
+    fillSelect('s-niccode', niccodes, niccode);
   }
 }
 
-function fillSelect(id, opts) {
+// fillSelect preserves the current value if it still exists in new options
+function fillSelect(id, opts, currentVal) {
   const sel   = document.getElementById(id);
-  const curr  = sel.value;
   const first = sel.options[0].text;
   sel.innerHTML = `<option value="">${first}</option>` +
-    opts.map(v => `<option value="${v}">${v}</option>`).join('');
-  if (opts.includes(curr)) sel.value = curr;
+    opts.map(v => `<option value="${v}"${v === currentVal ? ' selected' : ''}>${v}</option>`).join('');
 }
 
 // ── COLUMN DEFINITIONS ────────────────────────────────────────────────────────
@@ -577,7 +560,6 @@ const SUPPLY_COLS = [
   { key: 'Category',        label: 'Category' },
 ];
 
-// ── RENDER TABLE ──────────────────────────────────────────────────────────────
 function renderTable() {
   const cols  = currentSide === 'demand' ? DEMAND_COLS : SUPPLY_COLS;
   const thead = document.getElementById('table-head');
@@ -603,7 +585,6 @@ function renderTable() {
 
   tbody.innerHTML = page.map(row => {
     return '<tr>' + cols.map(c => {
-      // Peak months column
       if (c.peak) {
         const months = getPeakMonths(row);
         if (!months.length) return `<td class="peak-cell"><span class="pill-none">—</span></td>`;
@@ -635,7 +616,6 @@ function sortBy(col) {
   renderTable();
 }
 
-// ── PAGINATION ────────────────────────────────────────────────────────────────
 function renderPagination() {
   const total      = filteredData.length;
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -667,32 +647,53 @@ function goPage(p) {
 // ── STATS ─────────────────────────────────────────────────────────────────────
 function updateStats() {
   const all = currentSide === 'demand' ? demandData : supplyData;
-  document.getElementById('stat-total').textContent    = all.length.toLocaleString();
-  document.getElementById('stat-filtered').textContent = filteredData.length.toLocaleString();
 
   if (currentSide === 'demand') {
-    const rising    = filteredData.filter(r => (r['Trend_Direction']||'').includes('Rising')).length;
-    const declining = filteredData.filter(r => (r['Trend_Direction']||'').includes('Declining')).length;
-    const withPeak  = filteredData.filter(r => getPeakMonths(r).length > 0).length;
-    set3Stats(rising, 'Rising Trends', declining, 'Declining', withPeak, 'With Peak Data');
+    // Stat 1: Total Products (all rows in dataset)
+    document.getElementById('stat-total').textContent    = all.length.toLocaleString();
+    document.getElementById('stat-total-lbl').textContent = 'Total Products';
+
+    // Stat 2: Selected Products (filtered rows)
+    document.getElementById('stat-filtered').textContent = filteredData.length.toLocaleString();
+    document.getElementById('stat-filtered-lbl').textContent = 'Selected Products';
+
+    // Stat 3: Total Categories (across entire dataset)
+    const totalCats = new Set(all.map(r => r['Category']).filter(Boolean)).size;
+    document.getElementById('stat-extra1').textContent     = totalCats.toLocaleString();
+    document.getElementById('stat-extra1-lbl').textContent = 'Total Categories';
+
+    // Stat 4: Selected Categories (in filtered rows)
+    const selectedCats = new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
+    document.getElementById('stat-extra2').textContent     = selectedCats.toLocaleString();
+    document.getElementById('stat-extra2-lbl').textContent = 'Selected Categories';
+
+    // Stat 5: States in filtered view
+    const selectedStates = new Set(filteredData.map(r => r['State']).filter(Boolean)).size;
+    document.getElementById('stat-extra3').textContent     = selectedStates.toLocaleString();
+    document.getElementById('stat-extra3-lbl').textContent = 'States';
+
   } else {
-    const states     = new Set(filteredData.map(r => r['State'])).size;
-    const districts  = new Set(filteredData.map(r => r['District'])).size;
-    const categories = new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
-    set3Stats(states, 'States', districts, 'Districts', categories, 'Categories');
+    // Supply side keeps its original stats but respects the new naming approach
+    document.getElementById('stat-total').textContent     = all.length.toLocaleString();
+    document.getElementById('stat-total-lbl').textContent = 'Enterprises';
+
+    document.getElementById('stat-filtered').textContent     = filteredData.length.toLocaleString();
+    document.getElementById('stat-filtered-lbl').textContent = 'Selected Enterprises';
+
+    const totalCats = new Set(all.map(r => r['Category']).filter(Boolean)).size;
+    document.getElementById('stat-extra1').textContent     = totalCats.toLocaleString();
+    document.getElementById('stat-extra1-lbl').textContent = 'Total Categories';
+
+    const selectedCats = new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
+    document.getElementById('stat-extra2').textContent     = selectedCats.toLocaleString();
+    document.getElementById('stat-extra2-lbl').textContent = 'Selected Categories';
+
+    const districts = new Set(filteredData.map(r => r['District'])).size;
+    document.getElementById('stat-extra3').textContent     = districts.toLocaleString();
+    document.getElementById('stat-extra3-lbl').textContent = 'Districts';
   }
 }
 
-function set3Stats(v1,l1,v2,l2,v3,l3) {
-  document.getElementById('stat-extra1').textContent     = Number(v1).toLocaleString();
-  document.getElementById('stat-extra1-lbl').textContent = l1;
-  document.getElementById('stat-extra2').textContent     = Number(v2).toLocaleString();
-  document.getElementById('stat-extra2-lbl').textContent = l2;
-  document.getElementById('stat-extra3').textContent     = Number(v3).toLocaleString();
-  document.getElementById('stat-extra3-lbl').textContent = l3;
-}
-
-// ── REFRESH ───────────────────────────────────────────────────────────────────
 function refreshData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
@@ -709,7 +710,6 @@ function refreshData() {
   }, 500);
 }
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
 function showLoading(msg) {
   document.getElementById('loading-msg').textContent = msg || 'Loading…';
   document.getElementById('loading-overlay').classList.add('show');
@@ -721,7 +721,6 @@ function updateLastUpdated() {
     `Updated ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`;
 }
 
-// ── DARK MODE ─────────────────────────────────────────────────────────────────
 function toggleDarkMode() {
   const html     = document.documentElement;
   const newTheme = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
