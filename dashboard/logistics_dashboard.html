@@ -422,10 +422,6 @@ function switchSide(side) {
 }
 
 // ── DYNAMIC CASCADING FILTERS ─────────────────────────────────────────────────
-// Build filter options restricted to what's valid given earlier selections.
-// For demand: state → category → trend → peak month (each narrows the next).
-// For supply: state → district → category → NIC code.
-
 function applyFilters() {
   const all = currentSide === 'demand' ? demandData : supplyData;
   let data  = [...all];
@@ -475,7 +471,7 @@ function applyFilters() {
   currentPage  = 1;
   renderTable();
   updateStats();
-  buildFilterOptions();  // rebuild dropdowns based on current selections
+  buildFilterOptions();
 }
 
 // ── CASCADING DROPDOWN BUILDER ────────────────────────────────────────────────
@@ -488,20 +484,17 @@ function buildFilterOptions() {
     const trend    = document.getElementById('d-trend').value;
     const peak     = document.getElementById('d-peakmonth').value;
 
-    // States: unrestricted (always show all states)
     const states = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
     fillSelect('d-state', states, state);
 
-    // Categories: restricted to rows matching the selected state
     let afterState = state ? all.filter(r => r['State'] === state) : all;
     const categories = [...new Set(afterState.map(r => r['Category']).filter(Boolean))].sort();
     fillSelect('d-category', categories, category);
 
-    // Peak months: restricted to rows matching state + category + trend
-    let afterCat = category ? afterState.filter(r => r['Category'] === category) : afterState;
+    let afterCat   = category ? afterState.filter(r => r['Category'] === category) : afterState;
     let afterTrend = trend ? afterCat.filter(r => (r['Trend_Direction']||'').includes(trend)) : afterCat;
-    const peakSet = new Set(afterTrend.flatMap(r => getPeakMonths(r)));
-    const peaks = MONTH_NAMES.filter(m => peakSet.has(m));
+    const peakSet  = new Set(afterTrend.flatMap(r => getPeakMonths(r)));
+    const peaks    = MONTH_NAMES.filter(m => peakSet.has(m));
     fillSelect('d-peakmonth', peaks, peak);
 
   } else {
@@ -510,28 +503,23 @@ function buildFilterOptions() {
     const category = document.getElementById('s-category').value;
     const niccode  = document.getElementById('s-niccode').value;
 
-    // States: unrestricted
     const states = [...new Set(all.map(r => r['State']).filter(Boolean))].sort();
     fillSelect('s-state', states, state);
 
-    // Districts: restricted to selected state
-    let afterState = state ? all.filter(r => r['State'] === state) : all;
-    const districts = [...new Set(afterState.map(r => r['District']).filter(Boolean))].sort();
+    let afterState   = state ? all.filter(r => r['State'] === state) : all;
+    const districts  = [...new Set(afterState.map(r => r['District']).filter(Boolean))].sort();
     fillSelect('s-district', districts, district);
 
-    // Categories: restricted to state + district
     let afterDistrict = district ? afterState.filter(r => r['District'] === district) : afterState;
-    const categories = [...new Set(afterDistrict.map(r => r['Category']).filter(Boolean))].sort();
+    const categories  = [...new Set(afterDistrict.map(r => r['Category']).filter(Boolean))].sort();
     fillSelect('s-category', categories, category);
 
-    // NIC codes: restricted to state + district + category
-    let afterCat = category ? afterDistrict.filter(r => r['Category'] === category) : afterDistrict;
+    let afterCat  = category ? afterDistrict.filter(r => r['Category'] === category) : afterDistrict;
     const niccodes = [...new Set(afterCat.map(r => r['NIC_Code']).filter(Boolean).map(v => String(v)))].sort();
     fillSelect('s-niccode', niccodes, niccode);
   }
 }
 
-// fillSelect preserves the current value if it still exists in new options
 function fillSelect(id, opts, currentVal) {
   const sel   = document.getElementById(id);
   const first = sel.options[0].text;
@@ -649,31 +637,25 @@ function updateStats() {
   const all = currentSide === 'demand' ? demandData : supplyData;
 
   if (currentSide === 'demand') {
-    // Stat 1: Total Products (all rows in dataset)
-    document.getElementById('stat-total').textContent    = all.length.toLocaleString();
+    document.getElementById('stat-total').textContent     = all.length.toLocaleString();
     document.getElementById('stat-total-lbl').textContent = 'Total Products';
 
-    // Stat 2: Selected Products (filtered rows)
-    document.getElementById('stat-filtered').textContent = filteredData.length.toLocaleString();
+    document.getElementById('stat-filtered').textContent     = filteredData.length.toLocaleString();
     document.getElementById('stat-filtered-lbl').textContent = 'Selected Products';
 
-    // Stat 3: Total Categories (across entire dataset)
     const totalCats = new Set(all.map(r => r['Category']).filter(Boolean)).size;
     document.getElementById('stat-extra1').textContent     = totalCats.toLocaleString();
     document.getElementById('stat-extra1-lbl').textContent = 'Total Categories';
 
-    // Stat 4: Selected Categories (in filtered rows)
     const selectedCats = new Set(filteredData.map(r => r['Category']).filter(Boolean)).size;
     document.getElementById('stat-extra2').textContent     = selectedCats.toLocaleString();
     document.getElementById('stat-extra2-lbl').textContent = 'Selected Categories';
 
-    // Stat 5: States in filtered view
     const selectedStates = new Set(filteredData.map(r => r['State']).filter(Boolean)).size;
     document.getElementById('stat-extra3').textContent     = selectedStates.toLocaleString();
     document.getElementById('stat-extra3-lbl').textContent = 'States';
 
   } else {
-    // Supply side keeps its original stats but respects the new naming approach
     document.getElementById('stat-total').textContent     = all.length.toLocaleString();
     document.getElementById('stat-total-lbl').textContent = 'Enterprises';
 
@@ -694,20 +676,26 @@ function updateStats() {
   }
 }
 
+// ── REFRESH ───────────────────────────────────────────────────────────────────
 function refreshData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
+
+  // Clear all state
   setDemandData([]);
   supplyData = []; trendsMap = {};
-  ['trends-file-badge','supply-file-badge'].forEach(id =>
+  ['trends-file-badge', 'supply-file-badge'].forEach(id =>
     document.getElementById(id).style.display = 'none');
   filteredData = [];
-  renderTable(); updateStats();
-  setTimeout(() => {
+  renderTable();
+  updateStats();
+
+  // Re-fetch from the repo URL, then stop the spinner regardless of outcome.
+  // autoLoadTrendsFromRepo() handles showLoading/hideLoading and applyFilters()
+  // internally, so no need to call them again here.
+  autoLoadTrendsFromRepo().finally(() => {
     btn.classList.remove('spinning');
-    applyFilters();
-    updateLastUpdated();
-  }, 500);
+  });
 }
 
 function showLoading(msg) {
