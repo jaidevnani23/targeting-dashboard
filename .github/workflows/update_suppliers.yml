@@ -1,23 +1,42 @@
 name: Update Suppliers
+
 on:
   schedule:
-    # FIX 3: Staggered from update_products.yml to avoid simultaneous git pushes
-    # to main (which caused silent push conflicts).
-    # Now: suppliers runs at 00:30 UTC (06:00 IST), products at 08:00 UTC — no overlap.
+    # Quarterly: 1st of Jan, Apr, Jul, Oct at 00:30 UTC (06:00 IST).
+    # Staggered from update_products.yml (08:00 UTC) to prevent simultaneous
+    # pushes to main.
     - cron: '30 0 1 1,4,7,10 *'
   workflow_dispatch:
+    inputs:
+      reset:
+        description: 'Start fresh (ignore checkpoint)?'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
 jobs:
   fetch-suppliers:
-    name: Fetch MSME Suppliers (All States)
+    name: Fetch MSME Suppliers
     runs-on: ubuntu-latest
+    # 6 hours is the GitHub Actions hard ceiling.
+    # At 4s/request and ~4,500 total pages the happy-path run takes ~5 hrs.
+    # The retrigger job below handles anything that doesn't finish in time.
     timeout-minutes: 360
+
+    # Make the exit code available to the retrigger job that runs after this one.
+    outputs:
+      run_incomplete: ${{ steps.run_fetcher.outputs.incomplete }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
@@ -25,53 +44,102 @@ jobs:
           key: ${{ runner.os }}-pip-suppliers-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-suppliers-
+
       - name: Install dependencies
-        run: pip install requests pandas openpyxl python-dotenv
-      # ── RATE LIMIT NOTE ────────────────────────────────────────────────────
-      # data.gov.in enforces 1,000 API calls/hour per key (per HTTP request,
-      # not per record). The fetcher uses BATCH_SIZE=1000 records per call,
-      # so each paginated fetch counts as 1 call. With ~7-10s random delays
-      # between batches, throughput stays well under 360 calls/hour.
-      # If you hit 429s, raise MIN_BATCH_DELAY / MAX_BATCH_DELAY in the script.
-      # ───────────────────────────────────────────────────────────────────────
+        run: pip install requests pandas openpyxl
+
+      # ── Rate limit note ───────────────────────────────────────────────────
+      # data.gov.in: 1,000 HTTP requests/hour per key (per request, not per
+      # record).  BATCH_SIZE=1000 means each page fetch = 1 request.
+      # MIN_REQUEST_GAP=4.0s in the script → ~900 req/hr with 10% headroom.
+      # If you see 429s in the logs, raise MIN_REQUEST_GAP in the script.
+      # ─────────────────────────────────────────────────────────────────────
+
       - name: Run MSME supplier fetcher
+        id: run_fetcher
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
-        run: python msme_supplier_fetcher.py
-      - name: Check outputs were produced
+        # Exit codes from the script:
+        #   0 → all 36 states completed cleanly
+        #   2 → run ended with states still pending (timeout hit mid-run,
+        #        or some states failed); retrigger job will fire another run
+        #   anything else → hard error (missing file, bad API key, etc.)
+        run: |
+          RESET_FLAG=""
+          if [ "${{ github.event.inputs.reset }}" = "true" ]; then
+            RESET_FLAG="--reset"
+            echo "Reset flag set — ignoring any existing checkpoint."
+          fi
+
+          python msme_supplier_fetcher.py $RESET_FLAG
+          EXIT_CODE=$?
+
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "incomplete=true"  >> "$GITHUB_OUTPUT"
+            echo "Run ended with pending states — retrigger job will continue."
+          elif [ $EXIT_CODE -eq 0 ]; then
+            echo "incomplete=false" >> "$GITHUB_OUTPUT"
+            echo "All states completed successfully."
+          else
+            echo "incomplete=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Fetcher exited with code $EXIT_CODE — check logs above."
+            exit $EXIT_CODE
+          fi
+
+      - name: Verify output files were produced
         run: |
           count=$(find data/suppliers -name "suppliers_*.csv" 2>/dev/null | wc -l)
-          echo "Supplier files produced: $count"
+          echo "Supplier CSV files present: $count"
           if [ "$count" -eq 0 ]; then
-            echo "::error::No supplier files were written — check API key and script logs."
+            echo "::error::No supplier files found after run — check API key and script logs."
             exit 1
           fi
-      # FIX 4: Checkpoint is now named fetch_checkpoint.json (no leading dot)
-      # so Git does not ignore it. This means interrupted runs can resume
-      # from where they left off on the next workflow_dispatch.
+
       - name: Commit and push supplier data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Pull latest so we don't clobber concurrent pushes (e.g. products workflow)
           git pull --rebase origin main
-          git add data/suppliers/ ||true
-          git diff --cached --quiet && echo "No changes to commit." || \
+
+          # Stage supplier data and the checkpoint (so the next run can resume)
+          git add data/suppliers/
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit — data is already up to date."
+          else
             git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
-          git push
-      - name: Warn if run was incomplete
-        run: |
-          # FIX 4: Updated checkpoint filename to match the renamed file
-          if [ -f "data/suppliers/fetch_checkpoint.json" ]; then
-            failed=$(python3 -c "
-          import json
-          with open('data/suppliers/fetch_checkpoint.json') as f:
-            d = json.load(f)
-          failed = d.get('failed', [])
-          completed = d.get('completed', [])
-          print(f'Completed: {len(completed)}/36 states')
-          if failed:
-            print('Failed states: ' + ', '.join(failed))
-            ")
-            echo "::warning::Run was incomplete. $failed"
-            echo "To resume: go to Actions → Update Suppliers → Run workflow"
+            git push
           fi
+
+  # ── Retrigger job ──────────────────────────────────────────────────────────
+  # If fetch-suppliers exited with code 2 (states still pending), this job
+  # fires a new workflow_dispatch run so the next run picks up the checkpoint
+  # and continues from where this one left off.
+  #
+  # The loop terminates naturally once all 36 states are done and the script
+  # exits 0.  A full quarterly refresh may take 2–3 consecutive runs.
+  retrigger-if-incomplete:
+    name: Retrigger if run was incomplete
+    needs: fetch-suppliers
+    runs-on: ubuntu-latest
+    # Only fire when the fetcher signalled it didn't finish
+    if: needs.fetch-suppliers.outputs.run_incomplete == 'true'
+
+    steps:
+      - name: Trigger another fetch run via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Run was incomplete — triggering a continuation run."
+
+          # Small delay so the previous run's git push has time to land
+          # before the new run checks out the repo with the updated checkpoint.
+          sleep 30
+
+          gh workflow run update_suppliers.yml \
+            --repo "${{ github.repository }}" \
+            --ref  "${{ github.ref_name }}"
+
+          echo "Continuation run triggered successfully."
