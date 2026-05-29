@@ -1,62 +1,78 @@
-#!/usr/bin/env python3
 """
 MSME Supplier Fetcher
 =====================
-Fetches MSME registered units from data.gov.in API, filters by NIC codes
-in data/Key_NIC_Codes_List.xlsx, maps categories from data/Demand_Excel_Filled.xlsx,
-and outputs one suppliers_[State].csv per state into data/suppliers/.
+Fetches MSME registered units from data.gov.in, filters by NIC codes
+defined in data/Key_NIC_Codes_List.xlsx, maps categories from
+data/Demand_Excel_Filled.xlsx, and writes one
+    data/suppliers/suppliers_<State>.csv
+per state.
 
-Adding new NIC codes to Key_NIC_Codes_List.xlsx automatically expands
-what gets fetched and categorised — no code changes needed.
+Rate limit: data.gov.in allows 1,000 requests/hour (rolling).
+This script enforces a minimum 4.0s gap between every API call,
+targeting ~900 req/hr to leave a safety margin.
 
-Run schedule: Quarterly (1st of Jan, Apr, Jul, Oct) via GitHub Actions.
-Can also be run manually: python msme_supplier_fetcher.py
+Checkpoint: completed states are saved to data/suppliers/fetch_checkpoint.json
+after each state so runs can resume after a timeout or failure.
+
+Exit codes (read by the GitHub Actions workflow):
+    0  — all states completed cleanly
+    2  — run ended with states still pending (timeout / partial run);
+         the workflow uses this to auto-retrigger itself
 
 Requirements:
-    pip install requests pandas openpyxl python-dotenv
+    pip install requests pandas openpyxl
+
+Usage:
+    python msme_supplier_fetcher.py               # normal run / resume
+    python msme_supplier_fetcher.py --reset       # ignore checkpoint, start fresh
+    python msme_supplier_fetcher.py --state DELHI # run a single state
+    python msme_supplier_fetcher.py --dry-run     # fetch + filter but don't write CSVs
 """
 
-import requests
-import pandas as pd
-import os
+import argparse
 import json
-import time
-import random
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import sys
+import time
+
+import pandas as pd
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from dotenv import load_dotenv
 
-load_dotenv()
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONFIG  — edit only this block
+# ─────────────────────────────────────────────────────────────────────────────
+# API key is read from the DATA_GOV_API_KEY environment variable (set in GitHub
+# Actions secrets).  The fallback hardcoded value is used for local runs only.
+API_KEY = os.environ.get(
+    "DATA_GOV_API_KEY",
+    "579b464db66ec23bdd000001d2ecc2400ab74128657eb9c1309228b3",
+)
+RESOURCE_ID = "8b68ae56-84cf-4728-a0a6-1be11028dea7"
+BASE_URL    = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-API_KEY = os.getenv("DATA_GOV_API_KEY")
-if not API_KEY:
-    raise EnvironmentError("DATA_GOV_API_KEY not set in environment or .env file")
-RESOURCE_ID  = "list-msme-registered-units-under-udyam"
-BASE_URL     = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
+NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
+DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
+OUTPUT_DIR     = "data/suppliers"
+CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
-NIC_CODES_FILE  = "data/Key_NIC_Codes_List.xlsx"
-DEMAND_FILE     = "data/Demand_Excel_Filled.xlsx"
-OUTPUT_DIR      = "data/suppliers"
+BATCH_SIZE     = 1000   # records per API page; max the API supports
+TIMEOUT_SEC    = 90     # per-request timeout
+MAX_RETRIES    = 4      # application-level retries (on top of urllib3 retries)
+RETRY_BASE_SEC = 5      # first retry wait; doubles each attempt → 5,10,20,40s
 
-CHECKPOINT_FILE = "data/suppliers/fetch_checkpoint.json"
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+# Hard limit is 1,000 req/hr rolling.  We target ~900/hr → 4.0s between calls.
+# _last_request_at tracks the wall-clock time of the last call so any time
+# already spent in JSON parsing / file I/O counts toward the gap.
+MIN_REQUEST_GAP  = 4.0   # seconds; raise to 4.5 if you still see 429s
+_last_request_at: float = 0.0
 
-BATCH_SIZE       = 100
-TIMEOUT_SEC      = 120
-MAX_RETRIES      = 5
-MIN_BATCH_DELAY  = 6.77585
-MAX_BATCH_DELAY  = 9.84774
-STATE_DELAY_SEC  = 2
-MAX_PAGE_WORKERS = 1
-
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s  %(levelname)-7s  %(message)s",
-                    datefmt="%H:%M:%S")
-log = logging.getLogger(__name__)
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  STATES / UTs
+# ─────────────────────────────────────────────────────────────────────────────
 STATES_AND_UTS = [
     "ANDAMAN AND NICOBAR ISLANDS", "ANDHRA PRADESH", "ARUNACHAL PRADESH",
     "ASSAM", "BIHAR", "CHANDIGARH", "CHHATTISGARH",
@@ -68,118 +84,56 @@ STATES_AND_UTS = [
     "TRIPURA", "UTTAR PRADESH", "UTTARAKHAND", "WEST BENGAL",
 ]
 
-# ── FIX 1: ROBUST COLUMN DETECTION ───────────────────────────────────────────
-def find_column(df_columns, *keywords):
-    """
-    Case-insensitive search for a column whose name contains ANY of the
-    given keywords. Returns the first match, or None if nothing found.
-    Logs every candidate it sees so you can debug API column name changes.
-    """
-    cols_lower = {c.lower(): c for c in df_columns}
-    for kw in keywords:
-        for lower, original in cols_lower.items():
-            if kw.lower() in lower:
-                return original
-    return None
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
-
-def detect_nic_columns(df):
-    """
-    Returns (activities_col, flat_nic_col) — at most one will be non-None.
-    Logs the actual column list so you can see exactly what the API returned.
-    """
-    log.info(f"  API columns: {list(df.columns)}")
-
-    activities_col = find_column(df.columns,
-                                 'activit', 'activities', 'activity')
-
-    flat_nic_col = find_column(df.columns,
-                               'nic5digit', 'nic_code', 'niccode',
-                               'nic5', 'nic')
-
-    log.info(f"  Detected → activities_col={activities_col!r}, flat_nic_col={flat_nic_col!r}")
-    return activities_col, flat_nic_col
-
-
-# ── CHECKPOINT ────────────────────────────────────────────────────────────────
-def load_checkpoint() -> dict:
-    if not os.path.exists(CHECKPOINT_FILE):
-        return {"completed": [], "failed": []}
-    try:
-        with open(CHECKPOINT_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        log.info(f"Checkpoint loaded — {len(data.get('completed', []))} states already done, "
-                 f"{len(data.get('failed', []))} previously failed")
-        return data
-    except Exception as e:
-        log.warning(f"Could not read checkpoint file: {e}. Starting fresh.")
-        return {"completed": [], "failed": []}
-
-
-def save_checkpoint(checkpoint: dict):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    tmp = CHECKPOINT_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(checkpoint, f, indent=2)
-    os.replace(tmp, CHECKPOINT_FILE)
-
-
-def clear_checkpoint():
-    if os.path.exists(CHECKPOINT_FILE):
-        os.remove(CHECKPOINT_FILE)
-        log.info("Checkpoint cleared — clean run complete.")
-
-
-# ── LOAD REFERENCE FILES ──────────────────────────────────────────────────────
-def load_nic_codes():
-    df = pd.read_excel(NIC_CODES_FILE)
-    code_col = next(c for c in df.columns if 'nic' in c.lower() and 'code' in c.lower())
-    desc_col = next(c for c in df.columns if 'desc' in c.lower())
-    df[code_col] = df[code_col].astype(str).str.strip()
-    nic_set  = set(df[code_col].tolist())
-    nic_desc = dict(zip(df[code_col], df[desc_col]))
-    log.info(f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE}")
-    return nic_set, nic_desc
-
-
-def load_category_mapping():
-    df = pd.read_excel(DEMAND_FILE)
-    nic_col = next(c for c in df.columns if 'nic' in c.lower())
-    cat_col = next(c for c in df.columns if 'cat' in c.lower())
-    df[nic_col] = df[nic_col].astype(str).str.strip()
-    mapping = (
-        df.groupby(nic_col)[cat_col]
-        .agg(lambda x: x.mode()[0])
-        .to_dict()
+# ─────────────────────────────────────────────────────────────────────────────
+#  HTTP SESSION
+#  urllib3 retries handle transient TCP/TLS errors.
+#  Application-level retries in fetch_page() handle 502s and empty bodies.
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
     )
-    log.info(f"Loaded {len(mapping)} NIC→Category mappings from {DEMAND_FILE}")
-    return mapping
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://",  adapter)
+    return s
+
+SESSION = _build_session()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  RATE-LIMITED FETCH
+# ─────────────────────────────────────────────────────────────────────────────
+def _throttle():
+    """Sleep just long enough so we never fire faster than MIN_REQUEST_GAP."""
+    global _last_request_at
+    elapsed = time.monotonic() - _last_request_at
+    gap = MIN_REQUEST_GAP - elapsed
+    if gap > 0:
+        time.sleep(gap)
+    _last_request_at = time.monotonic()
 
 
-# ── RANDOM DELAY ──────────────────────────────────────────────────────────────
-def random_batch_delay():
-    delay = random.uniform(MIN_BATCH_DELAY, MAX_BATCH_DELAY)
-    log.info(f"💤 Waiting {delay:.5f}s before next batch...")
-    time.sleep(delay)
-
-
-# ── HTTP SESSION ──────────────────────────────────────────────────────────────
-_local = threading.local()
-
-def get_session():
-    if not hasattr(_local, "session"):
-        s = requests.Session()
-        retry = Retry(total=3, backoff_factor=2,
-                      status_forcelist=[500, 502, 503, 504],
-                      allowed_methods=["GET"])
-        s.mount("https://", HTTPAdapter(max_retries=retry))
-        s.mount("http://",  HTTPAdapter(max_retries=retry))
-        _local.session = s
-    return _local.session
-
-
-# ── API FETCH ─────────────────────────────────────────────────────────────────
 def fetch_page(state: str, offset: int) -> dict:
+    """
+    Fetch one page of results for a state.
+    Returns the parsed JSON dict.
+    Raises RuntimeError after MAX_RETRIES consecutive failures.
+    """
     params = {
         "api-key":        API_KEY,
         "format":         "json",
@@ -187,188 +141,394 @@ def fetch_page(state: str, offset: int) -> dict:
         "offset":         offset,
         "filters[State]": state,
     }
-    session = get_session()
+
     for attempt in range(1, MAX_RETRIES + 1):
+        _throttle()
         try:
-            resp = session.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
+            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
+
+            # 429: rate limited — back off hard before retrying
+            if resp.status_code == 429:
+                wait = 60 * attempt   # 60s, 120s, 180s, 240s
+                log.warning(
+                    f"[{state}] offset={offset} — 429 Rate Limited. "
+                    f"Backing off {wait}s (attempt {attempt}/{MAX_RETRIES})"
+                )
+                time.sleep(wait)
+                continue
+
             resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            wait = 30 * (2 ** (attempt - 1))
-            log.warning(f"[{state}] offset={offset} attempt {attempt}: {e}. Retry in {wait}s")
+            data = resp.json()
+
+            # API sometimes returns HTTP 200 with an error body and no 'records'
+            if "records" not in data:
+                if attempt < MAX_RETRIES:
+                    wait = RETRY_BASE_SEC * (2 ** (attempt - 1))
+                    log.warning(
+                        f"[{state}] offset={offset} — no 'records' in response "
+                        f"(attempt {attempt}/{MAX_RETRIES}). "
+                        f"Body: {str(data)[:200]}. Retrying in {wait}s"
+                    )
+                    time.sleep(wait)
+                    continue
+                # Last attempt: return what we have so the caller can decide
+                return data
+
+            return data
+
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as exc:
+            wait = RETRY_BASE_SEC * (2 ** (attempt - 1))   # 5, 10, 20, 40s
+            log.warning(
+                f"[{state}] offset={offset} attempt {attempt}/{MAX_RETRIES}: "
+                f"{exc}. Retrying in {wait}s"
+            )
             time.sleep(wait)
-    raise RuntimeError(f"[{state}] Failed at offset={offset} after {MAX_RETRIES} attempts.")
+
+    raise RuntimeError(
+        f"[{state}] offset={offset} failed after {MAX_RETRIES} attempts."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOAD REFERENCE FILES
+# ─────────────────────────────────────────────────────────────────────────────
+def load_nic_codes() -> tuple[set, dict]:
+    """
+    Reads Key_NIC_Codes_List.xlsx.
+    Finds the NIC code column (must contain 'nic') and description column
+    (must contain 'desc').
+    Returns (nic_set, nic_description_map).
+    """
+    df = pd.read_excel(NIC_CODES_FILE, dtype=str)
+    df.columns = df.columns.str.strip()
+
+    # Prefer a column that has both 'nic' and 'code'; fall back to just 'nic'
+    code_col = next(
+        (c for c in df.columns if "nic" in c.lower() and "code" in c.lower()),
+        None,
+    ) or next(
+        (c for c in df.columns if "nic" in c.lower()),
+        None,
+    )
+    if code_col is None:
+        raise ValueError(
+            f"Cannot find a NIC code column in {NIC_CODES_FILE}. "
+            f"Columns present: {list(df.columns)}"
+        )
+
+    desc_col = next(
+        (c for c in df.columns if "desc" in c.lower()),
+        None,
+    )
+
+    df[code_col] = df[code_col].str.strip().str.zfill(5)
+    nic_set  = set(df[code_col].dropna().tolist())
+    nic_desc = (
+        dict(zip(df[code_col], df[desc_col].fillna(""))) if desc_col else {}
+    )
+
+    log.info(
+        f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE}  "
+        f"(col: {code_col!r})"
+    )
+    return nic_set, nic_desc
 
 
-def fetch_all_for_state(state: str) -> pd.DataFrame:
-    first = fetch_page(state, 0)
-    total = int(first.get("total", 0))
+def load_category_mapping() -> dict:
+    """
+    Reads Demand_Excel_Filled.xlsx.
+    Finds the NIC column (contains 'nic') and Category column (contains 'cat').
+    Returns {nic_code: category_string}.
+    """
+    df = pd.read_excel(DEMAND_FILE, dtype=str)
+    df.columns = df.columns.str.strip()
+
+    nic_col = next((c for c in df.columns if "nic" in c.lower()), None)
+    cat_col = next((c for c in df.columns if "cat" in c.lower()), None)
+
+    if nic_col is None or cat_col is None:
+        raise ValueError(
+            f"Cannot find NIC or Category columns in {DEMAND_FILE}. "
+            f"Columns present: {list(df.columns)}"
+        )
+
+    df[nic_col] = df[nic_col].str.strip().str.zfill(5)
+    mapping = (
+        df.dropna(subset=[nic_col, cat_col])
+        .groupby(nic_col)[cat_col]
+        .agg(lambda x: x.mode().iloc[0])
+        .to_dict()
+    )
+
+    log.info(
+        f"Loaded {len(mapping)} NIC→Category mappings from {DEMAND_FILE}  "
+        f"(cols: {nic_col!r}, {cat_col!r})"
+    )
+    return mapping
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  NIC CODE EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+def _find_nic_column(columns) -> str | None:
+    """
+    Locate the NIC-code column from whatever the API returns.
+    Logs all column names so you can update keywords if the API changes.
+    """
+    log.info(f"  API columns seen: {list(columns)}")
+    for kw in ["nic5digit", "nic5", "niccode", "nic_code", "nic"]:
+        for col in columns:
+            if kw in col.lower():
+                log.info(f"  → NIC column matched: {col!r}  (keyword: {kw!r})")
+                return col
+    return None
+
+
+def _extract_nic_codes(raw_value) -> list[str]:
+    """
+    Parse all 5-digit NIC codes from a raw cell value.
+    Handles: "14101", "14101; 22199", "1) 14101; 2) 22199; 3) 32909"
+    Returns zero-padded 5-character strings.
+    """
+    if not raw_value or str(raw_value).strip() in ("", "nan", "NA"):
+        return []
+    codes = []
+    for part in str(raw_value).split(";"):
+        part = part.strip()
+        if ")" in part:
+            part = part.split(")")[-1].strip()
+        if part and part != "nan":
+            codes.append(part.zfill(5))
+    return codes
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PROCESS ONE STATE
+# ─────────────────────────────────────────────────────────────────────────────
+def process_state(
+    state: str,
+    nic_set: set,
+    nic_desc: dict,
+    cat_map: dict,
+) -> list[dict]:
+    """
+    Fetches all pages for a state, filters to matching NIC codes, and
+    returns a list of result-row dicts.
+    """
+    first      = fetch_page(state, 0)
+    total      = int(first.get("total", 0))
+
     if total == 0:
-        return pd.DataFrame()
+        log.info(f"[{state}] No records in API — skipping.")
+        return []
 
     all_records = list(first.get("records", []))
     offsets     = list(range(BATCH_SIZE, total, BATCH_SIZE))
-    log.info(f"[{state}] {total:,} records across {1 + len(offsets)} pages")
+    total_pages = 1 + len(offsets)
 
-    for idx, off in enumerate(offsets):
-        random_batch_delay()
-        records = fetch_page(state, off).get("records", [])
-        all_records.extend(records)
-        log.info(f"[{state}] Fetched page {idx + 2}/{1 + len(offsets)} (offset {off})")
+    log.info(f"[{state}] {total:,} records across {total_pages} page(s)")
 
-    return pd.DataFrame(all_records)
+    for page_num, offset in enumerate(offsets, start=2):
+        data = fetch_page(state, offset)
+        all_records.extend(data.get("records", []))
+        log.info(
+            f"[{state}] page {page_num}/{total_pages}  "
+            f"({len(all_records):,}/{total:,} fetched)"
+        )
 
-
-# ── FILTER + FORMAT ───────────────────────────────────────────────────────────
-def process_state(state: str, nic_set: set, nic_desc: dict, cat_map: dict) -> list:
-    df = fetch_all_for_state(state)
+    df = pd.DataFrame(all_records)
     if df.empty:
-        log.info(f"[{state}] No records returned from API.")
+        log.warning(f"[{state}] DataFrame empty after assembling all pages.")
         return []
 
-    activities_col, flat_nic_col = detect_nic_columns(df)
-
-    results = []
-
-    if activities_col:
-        for _, row in df.iterrows():
-            raw = row.get(activities_col, "[]")
-            try:
-                activities = json.loads(raw) if isinstance(raw, str) else (raw or [])
-            except (json.JSONDecodeError, TypeError):
-                activities = []
-
-            for activity in activities:
-                if not isinstance(activity, dict):
-                    continue
-                nic_code = (
-                    str(activity.get("NIC5DigitId", "") or
-                        activity.get("NIC5DigitCode", "") or
-                        activity.get("nic5digitid", "") or
-                        activity.get("NICCode", "") or
-                        "").strip()
-                )
-                if not nic_code or nic_code not in nic_set:
-                    continue
-                results.append({
-                    "State":           str(row.get("State", state)).strip().title(),
-                    "District":        str(row.get("District", "")).strip().title(),
-                    "Pincode":         str(row.get("Pincode", "")).strip(),
-                    "EnterpriseName":  str(row.get("EnterpriseName", "")).strip().title(),
-                    "NIC_Code":        nic_code,
-                    "NIC_Description": activity.get("Description", nic_desc.get(nic_code, "")),
-                    "Category":        cat_map.get(nic_code, "Uncategorised"),
-                })
-
-    elif flat_nic_col:
-        for _, row in df.iterrows():
-            raw_nic = str(row.get(flat_nic_col, "")).strip()
-            if not raw_nic or raw_nic == 'nan':
-                continue
-
-            # Parse " 1) 14101; 2) 22199; 3) 32909" → ["14101", "22199", "32909"]
-            codes = []
-            for part in raw_nic.split(';'):
-                code = part.strip()
-                if ')' in code:
-                    code = code.split(')')[-1].strip()
-                if code and code != 'nan':
-                    codes.append(code)
-
-            for code in codes:
-                if code not in nic_set:
-                    continue
-                results.append({
-                    "State":           str(row.get("State", state)).strip().title(),
-                    "District":        str(row.get("District", "")).strip().title(),
-                    "Pincode":         str(row.get("Pincode", "")).strip(),
-                    "EnterpriseName":  str(row.get("EnterpriseName", "")).strip().title(),
-                    "NIC_Code":        code,
-                    "NIC_Description": nic_desc.get(code, ""),
-                    "Category":        cat_map.get(code, "Uncategorised"),
-                })
-
-    else:
+    nic_col = _find_nic_column(df.columns)
+    if nic_col is None:
         log.error(
             f"[{state}] Could not find a NIC code column. "
-            f"API returned these columns: {list(df.columns)}. "
-            f"Update the keywords in find_column() to match one of these."
+            f"Update _find_nic_column() keywords to match: {list(df.columns)}"
         )
         return []
 
-    log.info(f"[{state}] {len(results):,} matching rows (from {len(df):,} total)")
+    results: list[dict] = []
+    for _, row in df.iterrows():
+        for code in _extract_nic_codes(row.get(nic_col, "")):
+            if code not in nic_set:
+                continue
+            results.append({
+                "State":           str(row.get("State",          state)).strip().title(),
+                "District":        str(row.get("District",       "")).strip().title(),
+                "Pincode":         str(row.get("Pincode",        "")).strip(),
+                "Enterprise_Name": str(row.get("EnterpriseName", "")).strip().title(),
+                "NIC_Code":        code,
+                "NIC_Description": nic_desc.get(code, ""),
+                "Category":        cat_map.get(code, "Uncategorised"),
+                "Enterprise_Type": str(row.get("EnterpriseType", "")).strip().title(),
+                "Major_Activity":  str(row.get("MajorActivity",  "")).strip().title(),
+            })
+
+    log.info(
+        f"[{state}] {len(results):,} matching supplier rows "
+        f"(from {len(df):,} total records)"
+    )
     return results
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  CHECKPOINT
+# ─────────────────────────────────────────────────────────────────────────────
+def _load_checkpoint() -> dict:
+    if not os.path.exists(CHECKPOINT):
+        return {"completed": [], "failed": []}
+    try:
+        with open(CHECKPOINT, encoding="utf-8") as f:
+            data = json.load(f)
+        log.info(
+            f"Checkpoint found — "
+            f"{len(data.get('completed', []))} completed, "
+            f"{len(data.get('failed', []))} previously failed."
+        )
+        return data
+    except Exception as exc:
+        log.warning(f"Could not read checkpoint ({exc}). Starting fresh.")
+        return {"completed": [], "failed": []}
 
-# ── SAVE ──────────────────────────────────────────────────────────────────────
-def save_state_csv(state: str, records: list):
+
+def _save_checkpoint(cp: dict):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    safe_name = state.title().replace(" ", "_")
-    path      = os.path.join(OUTPUT_DIR, f"suppliers_{safe_name}.csv")
+    tmp = CHECKPOINT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cp, f, indent=2)
+    os.replace(tmp, CHECKPOINT)   # atomic on POSIX
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SAVE
+# ─────────────────────────────────────────────────────────────────────────────
+def _safe_filename(s: str) -> str:
+    return (
+        s.strip().title()
+        .replace(" ", "_").replace("/", "-")
+        .replace("\\", "-").replace(":", "")
+    )
+
+
+def save_state_csv(state: str, records: list[dict]):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv")
     pd.DataFrame(records).to_csv(path, index=False, encoding="utf-8-sig")
-    log.info(f"[{state}] Saved {len(records):,} suppliers → {path}")
+    log.info(f"[{state}] → saved {len(records):,} rows to {path}")
 
-
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 def main():
-    log.info("=" * 60)
-    log.info("MSME Supplier Fetcher — Quarterly Run")
-    log.info("=" * 60)
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher")
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Ignore checkpoint and restart from the first state",
+    )
+    parser.add_argument(
+        "--state", type=str, default=None,
+        help="Run a single state only, e.g. --state DELHI",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Fetch and filter but do not write any CSV files",
+    )
+    args = parser.parse_args()
 
+    if not API_KEY:
+        log.error("DATA_GOV_API_KEY is not set. Aborting.")
+        sys.exit(1)
+
+    # ── Reference data ────────────────────────────────────────────────────────
     nic_set, nic_desc = load_nic_codes()
     cat_map           = load_category_mapping()
 
-    checkpoint    = load_checkpoint()
-    completed_set = set(checkpoint.get("completed", []))
-    failed_states = list(checkpoint.get("failed", []))
+    # ── Build work list ───────────────────────────────────────────────────────
+    if args.state:
+        target = args.state.strip().upper()
+        if target not in STATES_AND_UTS:
+            log.error(
+                f"Unknown state: {target!r}. "
+                f"Valid values:\n  " + "\n  ".join(STATES_AND_UTS)
+            )
+            sys.exit(1)
+        pending   = [target]
+        completed = set()
+        failed    = []
+    else:
+        cp        = {} if args.reset else _load_checkpoint()
+        completed = set(cp.get("completed", []))
+        failed    = list(cp.get("failed",    []))
+        pending   = [s for s in STATES_AND_UTS if s not in completed]
 
-    remaining = [s for s in STATES_AND_UTS if s not in completed_set]
-    if len(remaining) < len(STATES_AND_UTS):
-        skipped = len(STATES_AND_UTS) - len(remaining)
-        log.info(f"Resuming — skipping {skipped} already-completed state(s), "
-                 f"{len(remaining)} remaining.")
+    skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
+    print(f"\n{'='*62}")
+    print(f"  MSME Supplier Fetcher  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  NIC codes loaded    : {len(nic_set)}")
+    print(f"  States pending      : {len(pending)}")
+    if skipped:
+        print(f"  States skipped      : {skipped}  (already completed)")
+    print(f"  Batch size          : {BATCH_SIZE} records/page")
+    print(f"  Request gap         : {MIN_REQUEST_GAP}s  (~{int(3600/MIN_REQUEST_GAP)}/hr)")
+    print(f"  Output              : {OUTPUT_DIR}/suppliers_<State>.csv")
+    print(f"{'='*62}\n")
+
+    # ── Process states sequentially ───────────────────────────────────────────
     total_suppliers = 0
 
-    for i, state in enumerate(remaining, 1):
-        log.info(f"\n[{i:02d}/{len(remaining)}] Processing: {state.title()}")
+    for i, state in enumerate(pending, 1):
+        log.info(f"[{i:02d}/{len(pending)}] Starting: {state.title()}")
         try:
             records = process_state(state, nic_set, nic_desc, cat_map)
-            if records:
-                save_state_csv(state, records)
-                total_suppliers += len(records)
-            else:
-                log.info(f"[{state}] No matching suppliers — skipping file.")
 
-            completed_set.add(state)
-            failed_states = [s for s in failed_states if s != state]
-            checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
-            save_checkpoint(checkpoint)
+            if not args.dry_run:
+                if records:
+                    save_state_csv(state, records)
+                else:
+                    log.info(f"[{state}] No matching suppliers — no file written.")
 
-        except Exception as e:
-            log.error(f"[{state}] FAILED: {e}")
-            if state not in failed_states:
-                failed_states.append(state)
-            checkpoint = {"completed": sorted(completed_set), "failed": failed_states}
-            save_checkpoint(checkpoint)
+            total_suppliers += len(records)
+            completed.add(state)
+            failed = [s for s in failed if s != state]
 
-        if i < len(remaining):
-            time.sleep(STATE_DELAY_SEC)
+        except Exception as exc:
+            log.error(f"[{state}] FAILED: {exc}")
+            if state not in failed:
+                failed.append(state)
 
-    log.info("\n" + "=" * 60)
-    log.info(f"Total suppliers saved : {total_suppliers:,}")
-    log.info(f"Output folder         : {OUTPUT_DIR}/")
+        # Checkpoint after every state so partial runs are always resumable
+        if not args.state:
+            _save_checkpoint({"completed": sorted(completed), "failed": failed})
 
-    if failed_states:
-        log.info("Failed states (will be retried on next run):")
-        for s in failed_states:
-            log.info(f"  - {s.title()}")
+    # ── Summary ───────────────────────────────────────────────────────────────
+    still_pending = [s for s in STATES_AND_UTS if s not in completed]
+
+    print(f"\n{'='*62}")
+    print(f"  Total supplier rows saved : {total_suppliers:,}")
+    print(f"  Output folder             : {OUTPUT_DIR}/")
+    if failed:
+        print(f"\n  States that FAILED (will be retried on next run):")
+        for s in failed:
+            print(f"    - {s.title()}")
+    if still_pending:
+        print(f"\n  States still pending (not yet reached in this run):")
+        for s in still_pending:
+            print(f"    - {s.title()}")
+    if not failed and not still_pending:
+        print(f"  All states completed successfully.")
+    print(f"{'='*62}\n")
+
+    # ── Exit codes ────────────────────────────────────────────────────────────
+    # Exit 2 signals the GitHub Actions workflow to retrigger itself.
+    # Exit 1 is reserved for hard errors (bad API key, missing files, etc.).
+    if still_pending or failed:
+        sys.exit(2)   # incomplete — workflow will retrigger
     else:
-        log.info("All states completed successfully.")
-        if not (set(STATES_AND_UTS) - completed_set):
-            clear_checkpoint()
-
-    log.info("=" * 60)
+        # Clean run: remove checkpoint so next scheduled run starts fresh
+        if not args.state and not args.dry_run and os.path.exists(CHECKPOINT):
+            os.remove(CHECKPOINT)
+            log.info("Checkpoint cleared — clean full run complete.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
