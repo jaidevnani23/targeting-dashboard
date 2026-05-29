@@ -14,21 +14,25 @@ State allocation per product:
   - Tier 2 states (next 30%)                  → included
   - Floor guarantee                            → minimum 3 states always
 
-Run MANUALLY after reviewing new_products_suggestions.json.
+Run MANUALLY after reviewing new_products_suggestions.json, OR pass --yes
+to skip the confirmation prompt (used automatically by GitHub Actions CI).
 
 Usage:
-    python product_updater.py
+    python product_updater.py           # interactive — asks for confirmation
+    python product_updater.py --yes     # non-interactive — proceeds automatically
 
 Requirements:
     pip install pandas openpyxl
 """
 
-import pandas as pd
+import argparse
 import json
+import logging
 import os
 import shutil
-import logging
 from datetime import datetime
+
+import pandas as pd
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DEMAND_FILE      = "data/Demand_Excel_Filled.xlsx"
@@ -63,8 +67,10 @@ def load_suggestions() -> list:
     # Warn about products with no state allocation
     no_states = [s for s in approved if not s.get("State_Allocation")]
     if no_states:
-        log.warning(f"⚠️  {len(no_states)} approved product(s) have no state allocation "
-                    f"(supplier data missing for their NIC code) — they will be skipped.")
+        log.warning(
+            f"  {len(no_states)} approved product(s) have no state allocation "
+            f"(supplier data missing for their NIC code) — they will be skipped."
+        )
 
     if not approved:
         raise ValueError(
@@ -94,11 +100,11 @@ def build_new_rows(approved: list, existing_df: pd.DataFrame) -> pd.DataFrame:
     Uses the NIC code from the suggestion (strictly — no cross-state switching).
     Skips products with no state allocation or that already exist.
     """
-    state_col  = next(c for c in existing_df.columns if 'state' in c.lower())
+    state_col  = next(c for c in existing_df.columns if 'state'   in c.lower())
     prod_col   = next(c for c in existing_df.columns if 'product' in c.lower())
-    nic_col    = next(c for c in existing_df.columns if 'nic' in c.lower())
-    cat_col    = next(c for c in existing_df.columns if 'cat' in c.lower())
-    search_col = next(c for c in existing_df.columns if 'search' in c.lower())
+    nic_col    = next(c for c in existing_df.columns if 'nic'     in c.lower())
+    cat_col    = next(c for c in existing_df.columns if 'cat'     in c.lower())
+    search_col = next(c for c in existing_df.columns if 'search'  in c.lower())
 
     existing_pairs = set(zip(
         existing_df[state_col].str.lower().str.strip(),
@@ -117,7 +123,10 @@ def build_new_rows(approved: list, existing_df: pd.DataFrame) -> pd.DataFrame:
         state_allocation = suggestion.get("State_Allocation", [])
 
         if not state_allocation:
-            log.warning(f"Skipping '{product}' — no state allocation (NIC {nic_code} has no supplier data)")
+            log.warning(
+                f"Skipping '{product}' — no state allocation "
+                f"(NIC {nic_code} has no supplier data)"
+            )
             skipped_no_states += 1
             continue
 
@@ -162,8 +171,18 @@ def archive_suggestions():
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser(description="Product Updater")
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip confirmation prompt (used by GitHub Actions CI)",
+    )
+    args = parser.parse_args()
+
+    # Also auto-skip confirmation when running in CI (GitHub Actions sets CI=true)
+    auto_confirm = args.yes or os.environ.get("CI", "").lower() == "true"
+
     log.info("=" * 60)
-    log.info("Product Updater — Manual Run")
+    log.info("Product Updater — %s", "CI Run" if auto_confirm else "Manual Run")
     log.info(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
     log.info("=" * 60)
 
@@ -176,45 +195,54 @@ def main():
     new_rows_df = build_new_rows(approved, existing_df)
 
     if new_rows_df.empty:
-        log.info("No new rows to add — all approved products already exist or have no state data.")
+        log.info(
+            "No new rows to add — all approved products already exist "
+            "or have no state data."
+        )
         return
 
-    # Show preview grouped by product
-    print(f"\nAbout to add {len(new_rows_df)} rows across {len(approved)} approved products:\n")
+    # ── Preview ───────────────────────────────────────────────────────────────
+    print(f"\nAbout to add {len(new_rows_df)} rows "
+          f"across {len(approved)} approved products:\n")
     for suggestion in approved:
         product          = suggestion["Product"]
         nic_code         = suggestion["NIC_Code"]
         category         = suggestion["Category"]
         state_allocation = suggestion.get("State_Allocation", [])
         if not state_allocation:
-            print(f"  ✗ {product} — skipped (no supplier data for NIC {nic_code})")
+            print(f"  x {product} — skipped (no supplier data for NIC {nic_code})")
             continue
         tier1 = sum(1 for s in state_allocation if s["tier"] == 1)
         tier2 = sum(1 for s in state_allocation if s["tier"] == 2)
         tier3 = sum(1 for s in state_allocation if s["tier"] == 3)
-        print(f"  ✓ {product}")
+        print(f"  + {product}")
         print(f"      NIC: {nic_code} | Category: {category}")
         print(f"      States: {len(state_allocation)} total  "
               f"(Tier 1: {tier1}  Tier 2: {tier2}  Floor: {tier3})")
         top_states = [s["state"] for s in state_allocation[:5]]
         print(f"      Top states: {', '.join(top_states)}" +
-              (f"... +{len(state_allocation)-5} more" if len(state_allocation) > 5 else ""))
+              (f"... +{len(state_allocation)-5} more"
+               if len(state_allocation) > 5 else ""))
         print()
 
-    confirm = input("Proceed? (yes/no): ").strip().lower()
-    if confirm not in ("yes", "y"):
-        log.info("Cancelled. No changes made.")
-        return
+    # ── Confirm ───────────────────────────────────────────────────────────────
+    if auto_confirm:
+        log.info("CI mode — skipping confirmation prompt, proceeding automatically.")
+    else:
+        confirm = input("Proceed? (yes/no): ").strip().lower()
+        if confirm not in ("yes", "y"):
+            log.info("Cancelled. No changes made.")
+            return
 
     save_updated_excel(existing_df, new_rows_df)
     archive_suggestions()
 
     log.info("\n" + "=" * 60)
     log.info("Done! Next steps:")
-    log.info("1. Upload updated Demand_Excel_Filled.xlsx to GitHub (data/ folder)")
+    log.info("1. Demand_Excel_Filled.xlsx updated in data/ folder")
     log.info("2. Trends scraper picks up new products on its next monthly run")
     log.info("3. To run trends immediately:")
-    log.info("   GitHub → Actions → Update Trends Data → Run workflow")
+    log.info("   GitHub -> Actions -> Update Trends Data -> Run workflow")
     log.info("=" * 60)
 
 
