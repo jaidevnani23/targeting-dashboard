@@ -449,7 +449,8 @@ function applyFilters() {
     const niccode  = document.getElementById('s-niccode').value;
 
     if (search)   data = data.filter(r =>
-      (r['EnterpriseName']||'').toLowerCase().includes(search) ||
+      // FIX: fetcher outputs Enterprise_Name (with underscore), not EnterpriseName
+      (r['Enterprise_Name']||'').toLowerCase().includes(search) ||
       String(r['NIC_Code']||'').includes(search) ||
       (r['NIC_Description']||'').toLowerCase().includes(search));
     if (state)    data = data.filter(r => r['State'] === state);
@@ -539,13 +540,14 @@ const DEMAND_COLS = [
 ];
 
 const SUPPLY_COLS = [
-  { key: 'State',           label: 'State' },
-  { key: 'District',        label: 'District' },
-  { key: 'Pincode',         label: 'Pincode' },
-  { key: 'EnterpriseName',  label: 'Enterprise Name', wrap: true },
-  { key: 'NIC_Code',        label: 'NIC Code' },
-  { key: 'NIC_Description', label: 'NIC Description', wrap: true },
-  { key: 'Category',        label: 'Category' },
+  { key: 'State',            label: 'State' },
+  { key: 'District',         label: 'District' },
+  { key: 'Pincode',          label: 'Pincode' },
+  // FIX: fetcher outputs Enterprise_Name (with underscore), matching the output CSV
+  { key: 'Enterprise_Name',  label: 'Enterprise Name', wrap: true },
+  { key: 'NIC_Code',         label: 'NIC Code' },
+  { key: 'NIC_Description',  label: 'NIC Description', wrap: true },
+  { key: 'Category',         label: 'Category' },
 ];
 
 function renderTable() {
@@ -681,7 +683,6 @@ function refreshData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
 
-  // Clear all state
   setDemandData([]);
   supplyData = []; trendsMap = {};
   ['trends-file-badge', 'supply-file-badge'].forEach(id =>
@@ -690,9 +691,6 @@ function refreshData() {
   renderTable();
   updateStats();
 
-  // Re-fetch from the repo URL, then stop the spinner regardless of outcome.
-  // autoLoadTrendsFromRepo() handles showLoading/hideLoading and applyFilters()
-  // internally, so no need to call them again here.
   autoLoadTrendsFromRepo().finally(() => {
     btn.classList.remove('spinning');
   });
