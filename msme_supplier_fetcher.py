@@ -85,7 +85,8 @@ CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
 # FIX 6: 1000 records/page, 3s gap
 BATCH_SIZE    = 1000   # records per API page (reliable per live testing)
-TIMEOUT_SEC   = 3      # per-request socket timeout
+TIMEOUT_PROBE = 15     # timeout for the initial total-count JSON probe
+TIMEOUT_PAGE  = 5      # timeout for subsequent CSV page fetches
 MAX_RETRIES   = 4      # application-level retry attempts
 RETRY_BASE    = 5      # urllib3 backoff base (seconds)
 
@@ -197,12 +198,9 @@ def fetch_total(state: str) -> int:
     for attempt in range(1, MAX_RETRIES + 1):
         _throttle()
         try:
-            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
+            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_PROBE)
 
             if resp.status_code == 429:
-                wait = 120 + (60 * attempt)   # FIX 4
-                log.warning(
-                    f"[{state}] probe 429 — backing off {wait}s "
                     f"(attempt {attempt}/{MAX_RETRIES})"
                 )
                 time.sleep(wait)
@@ -255,7 +253,7 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
     for attempt in range(1, MAX_RETRIES + 1):
         _throttle()
         try:
-            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
+            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_PAGE)
 
             if resp.status_code == 429:
                 wait = 120 + (60 * attempt)   # FIX 4
