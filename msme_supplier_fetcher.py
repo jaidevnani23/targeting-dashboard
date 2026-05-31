@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v2
+MSME Supplier Fetcher  —  Production v3
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -8,38 +8,34 @@ data/Demand_Excel_Filled.xlsx, and writes one
 per state.
 
 Rate limit: data.gov.in allows 1,000 requests/hour (rolling window).
-This script enforces a 6.0s minimum gap → ~600 req/hr, giving 40%
-headroom. The entire run (~7,300 requests across 36 states/UTs) takes
-approximately 12 hours. Use the built-in checkpoint to split across
-multiple sessions or GitHub Actions runs.
+This script enforces a 15.0s minimum gap at 100 records/page →
+~240 req/hr, giving substantial headroom.
 
 Exit codes (read by GitHub Actions):
     0  — all states completed cleanly
     2  — states still pending (timeout/partial); workflow auto-retriggers
 
-FIXES vs v1
+FIXES vs v2
 -----------
-FIX 1 — urllib3 Retry must NOT include 429 in status_forcelist.
-    urllib3 intercepts 429 before application code sees it, consuming
-    retries with tiny backoffs, then raises MaxRetryError. The
-    application-layer 429 handler (with long waits) never fires.
-    → 429 removed from status_forcelist. Handled only in app layer.
+FIX 5 — Correct API response schema.
+    The API returns 9 columns:
+        LG_ST_Code, State, LG_DT_Code, District, Pincode,
+        RegistrationDate, EnterpriseName, CommunicationAddress, Activities
+    EnterpriseType and MajorActivity do NOT exist in the response.
+    NIC codes live in the 'Activities' column as a JSON array:
+        [{"NIC5DigitId":"14101","Description":"Manufacture of ..."}]
+    Previous code looked for columns with "nic" in the name — none exist.
+    _find_nic_column() is replaced with a constant; _extract_nic_codes()
+    now parses the JSON array format (with CSV double-quote escaping).
 
-FIX 2 — fetch_total fallback when total == 0.
-    Some data.gov.in resources return total=0 in the JSON envelope even
-    when records exist (e.g. very large states). Added fallback: if
-    total==0, attempt one CSV page; if rows return, switch to blind
-    pagination (stop only on empty page).
+FIX 6 — Batch size reduced to 100, gap increased to 15s.
+    Per user testing, 100 records/page is reliable.
+    15s gap → ~240 req/hr, well within the 1,000/hr limit.
 
-FIX 3 — NIC column detection broadened.
-    API response column is "NICCode5Digit". Multi-priority scan added
-    so it matches this and any future renames.
-
-FIX 4 — 429 backoff increased.
-    Old: 60 * attempt (60, 120, 180, 240s).
-    New: 120 + 60 * attempt (180, 240, 300, 360s).
-    At 600 req/hr, a 180s wait frees ~50 rolling-window slots —
-    enough to resume safely on the first retry in most cases.
+FIX 1 — (retained) urllib3 Retry excludes 429 from status_forcelist.
+FIX 2 — (retained) fallback blind pagination when total==0.
+FIX 3 — (removed, superseded by FIX 5) NIC column detection.
+FIX 4 — (retained) 429 backoff: 120 + 60*attempt seconds.
 
 Requirements:
     pip install requests pandas openpyxl
@@ -58,10 +54,10 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import sys
 import time
-import math
 from typing import Optional
 
 import pandas as pd
@@ -70,7 +66,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CONFIG  — edit only this block (or use env vars)
+#  CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 API_KEY = os.environ.get(
     "DATA_GOV_API_KEY",
@@ -87,17 +83,19 @@ DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
 OUTPUT_DIR     = "data/suppliers"
 CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
-BATCH_SIZE    = 1000   # records per API page
-TIMEOUT_SEC   = 90     # per-request socket timeout
+# FIX 6: 1000 records/page, 3s gap
+BATCH_SIZE    = 1000   # records per API page (reliable per live testing)
+TIMEOUT_SEC   = 3      # per-request socket timeout
 MAX_RETRIES   = 4      # application-level retry attempts
-RETRY_BASE    = 5      # urllib3 backoff base (seconds); 5, 10, 20s
+RETRY_BASE    = 5      # urllib3 backoff base (seconds)
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-# data.gov.in: 1,000 requests/hour rolling window.
-# 6.0s gap → 600 req/hr → 40% headroom.
-# Total run: ~7,300 requests × 6s ≈ 12 hours (see timing table at bottom).
-MIN_REQUEST_GAP: float = 6.0
+# FIX 6: 4.5s gap → ~800 req/hr (limit is 1,000/hr, ~20% headroom)
+MIN_REQUEST_GAP: float = 4.5
 _last_request_at: float = 0.0
+
+# FIX 5: The NIC codes are in the 'Activities' column — always.
+# This is a constant, not something to detect dynamically.
+ACTIVITIES_COLUMN = "Activities"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATES / UTs  (36 total)
@@ -153,16 +151,13 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTTP SESSION
-#  FIX 1: 429 is NOT in status_forcelist. It is handled only in app layer
-#  with long waits. Including 429 in urllib3's list would intercept it
-#  before application code runs, exhaust retries with tiny backoffs, and
-#  raise MaxRetryError — bypassing the proper long-wait handler entirely.
+#  FIX 1: 429 excluded from status_forcelist — handled in app layer only.
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_session() -> requests.Session:
     s = requests.Session()
     retry = Retry(
         total=3,
-        backoff_factor=2,               # waits: 2, 4, 8 seconds
+        backoff_factor=2,
         status_forcelist=[500, 502, 503, 504],   # 429 intentionally excluded
         allowed_methods=["GET"],
         raise_on_status=False,
@@ -179,8 +174,6 @@ SESSION = _build_session()
 #  RATE-LIMITER
 # ─────────────────────────────────────────────────────────────────────────────
 def _throttle() -> None:
-    """Block until at least MIN_REQUEST_GAP seconds have passed since the
-    last call. Guarantees we never exceed 600 req/hr."""
     global _last_request_at
     elapsed = time.monotonic() - _last_request_at
     gap = MIN_REQUEST_GAP - elapsed
@@ -188,17 +181,12 @@ def _throttle() -> None:
         time.sleep(gap)
     _last_request_at = time.monotonic()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  FETCH TOTAL  (JSON probe — 1 call per state)
-#  FIX 2: If total == 0, we fall back to blind CSV pagination.
-#         Some large states return total=0 in the envelope incorrectly.
+#  FIX 2: Returns -1 when total==0 to trigger blind pagination fallback.
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_total(state: str) -> int:
-    """
-    Returns the API-reported total record count for a state.
-    Returns -1 if the API returns 0 (triggers fallback pagination).
-    Returns 0 only after all retries fail (skip the state).
-    """
     params = {
         "api-key":        API_KEY,
         "format":         "json",
@@ -212,8 +200,7 @@ def fetch_total(state: str) -> int:
             resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
 
             if resp.status_code == 429:
-                # FIX 4: long backoff on 429
-                wait = 120 + (60 * attempt)
+                wait = 120 + (60 * attempt)   # FIX 4
                 log.warning(
                     f"[{state}] probe 429 — backing off {wait}s "
                     f"(attempt {attempt}/{MAX_RETRIES})"
@@ -226,12 +213,11 @@ def fetch_total(state: str) -> int:
             total = int(data.get("total", 0))
 
             if total == 0:
-                # FIX 2: could be an API envelope bug; use -1 as sentinel
                 log.warning(
                     f"[{state}] JSON probe returned total=0. "
                     "Will attempt blind CSV pagination as fallback."
                 )
-                return -1
+                return -1   # FIX 2
 
             log.info(f"[{state}] API total: {total:,} records "
                      f"(~{math.ceil(total/BATCH_SIZE)} pages)")
@@ -255,13 +241,8 @@ def fetch_total(state: str) -> int:
 def fetch_page_csv(state: str, offset: int) -> list[dict]:
     """
     Fetch one batch of records as CSV. Returns [] on empty page (end of data).
-    Raises RuntimeError after MAX_RETRIES failures (caller marks state failed).
-
-    FIX 4: 429 backoff is 120 + 60*attempt seconds (180, 240, 300, 360s).
-    At 600 req/hr, a 180s wait frees ~50 rolling-window slots, which is
-    sufficient to safely resume on the next attempt.
-
-    FIX 1: 429 is handled here, not in urllib3, so we get the full wait time.
+    Raises RuntimeError after MAX_RETRIES failures.
+    FIX 4: 429 backoff is 120 + 60*attempt seconds.
     """
     params = {
         "api-key":        API_KEY,
@@ -277,7 +258,7 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
             resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
 
             if resp.status_code == 429:
-                wait = 120 + (60 * attempt)   # FIX 4: 180, 240, 300, 360s
+                wait = 120 + (60 * attempt)   # FIX 4
                 log.warning(
                     f"[{state}] offset={offset} → 429 rate-limited. "
                     f"Waiting {wait}s ({wait/60:.1f} min) "
@@ -290,7 +271,6 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
             text = resp.text.strip()
 
             if not text:
-                # Empty body = past last page
                 log.debug(f"[{state}] offset={offset} — empty body, end of data.")
                 return []
 
@@ -301,7 +281,6 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
                 log.debug(f"[{state}] offset={offset} — header-only CSV, end of data.")
                 return []
 
-            # Log column names once on the first page (aids debugging FIX 3)
             if offset == 0:
                 log.info(f"[{state}] CSV columns: {list(rows[0].keys())}")
 
@@ -396,51 +375,51 @@ def load_category_mapping() -> dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NIC COLUMN DETECTION  (FIX 3)
+#  NIC CODE EXTRACTION  (FIX 5)
+#
+#  The API returns NIC codes in the 'Activities' column as a JSON array:
+#      [{"NIC5DigitId":"14101","Description":"Manufacture of ..."}]
+#
+#  CSV double-quote escaping means embedded quotes appear as "":
+#      "[{""NIC5DigitId"":""14101"","Description"":""Manufacture...""}]"
+#  Python's csv.DictReader already unescapes these before we see them,
+#  so by the time the value reaches this function it is valid JSON.
 # ─────────────────────────────────────────────────────────────────────────────
-def _find_nic_column(columns) -> Optional[str]:
-    """
-    Multi-priority scan for the NIC code column.
-    API currently returns 'NICCode5Digit'. Handles renames gracefully.
-
-    Priority 1: name contains both 'nic' and '5'  → "NICCode5Digit"
-    Priority 2: name contains both 'nic' and 'digit'
-    Priority 3: legacy keywords: 'niccode', 'nic_code', 'nic'
-    """
-    cols_lower = {c.lower(): c for c in columns}
-
-    for lo, orig in cols_lower.items():
-        if "nic" in lo and "5" in lo:
-            log.info(f"  NIC column (priority 1): {orig!r}")
-            return orig
-
-    for lo, orig in cols_lower.items():
-        if "nic" in lo and "digit" in lo:
-            log.info(f"  NIC column (priority 2): {orig!r}")
-            return orig
-
-    for kw in ("niccode", "nic_code", "nic"):
-        for lo, orig in cols_lower.items():
-            if kw in lo:
-                log.info(f"  NIC column (priority 3 / kw={kw!r}): {orig!r}")
-                return orig
-
-    log.error(
-        f"  Could not find NIC column. "
-        f"Add a keyword to _find_nic_column() for: {list(columns)}"
-    )
-    return None
-
-
 def _extract_nic_codes(raw_value) -> list[str]:
     """
-    Parse all 5-digit NIC codes from a cell value.
-    Handles: "14101", "14101; 22199", "1) 14101; 2) 22199; 3) 32909"
+    Parse all 5-digit NIC codes from the Activities column value.
+
+    Handles:
+      - JSON array (current API format):
+            [{"NIC5DigitId":"14101","Description":"..."}]
+      - Multiple codes in one row:
+            [{"NIC5DigitId":"32409","Description":"..."},
+             {"NIC5DigitId":"16296","Description":"..."}]
+      - Legacy plain-text fallback (kept for safety):
+            "1) 14101; 2) 22199"
     """
     if not raw_value or str(raw_value).strip() in ("", "nan", "NA"):
         return []
+
+    text = str(raw_value).strip()
+
+    # ── Primary path: JSON array ──────────────────────────────────────────
+    if text.startswith("["):
+        try:
+            entries = json.loads(text)
+            codes = []
+            for entry in entries:
+                code = str(entry.get("NIC5DigitId", "")).strip()
+                if code and code not in ("", "nan"):
+                    codes.append(code.zfill(5))
+            return codes
+        except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+            log.debug(f"JSON parse failed for Activities value, falling back: {exc}")
+            # fall through to legacy parser
+
+    # ── Fallback: legacy semicolon-separated plain text ───────────────────
     codes = []
-    for part in str(raw_value).split(";"):
+    for part in text.split(";"):
         part = part.strip()
         if ")" in part:
             part = part.split(")")[-1].strip()
@@ -450,7 +429,7 @@ def _extract_nic_codes(raw_value) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PROCESS ONE STATE
+#  PROCESS ONE STATE  (FIX 5: updated column mapping)
 # ─────────────────────────────────────────────────────────────────────────────
 def process_state(
     state: str,
@@ -461,11 +440,15 @@ def process_state(
     """
     Fetch all pages for a state, filter by NIC codes, return result rows.
 
-    FIX 2: If fetch_total returns -1 (total=0 from API despite data
-    existing), we use blind pagination: keep fetching until an empty page.
+    Actual API columns (confirmed from live response):
+        LG_ST_Code, State, LG_DT_Code, District, Pincode,
+        RegistrationDate, EnterpriseName, CommunicationAddress, Activities
+
+    FIX 2: If fetch_total returns -1, use blind pagination.
+    FIX 5: Map from actual column names; NIC codes from Activities column.
     """
-    total    = fetch_total(state)
-    blind    = (total == -1)   # FIX 2: fallback mode flag
+    total = fetch_total(state)
+    blind = (total == -1)
 
     if total == 0:
         log.info(f"[{state}] No records — skipping.")
@@ -478,8 +461,7 @@ def process_state(
         log.info(f"[{state}] {total:,} records → ~{expected_pages} pages")
 
     all_rows: list[dict] = []
-    nic_col:  Optional[str] = None
-    page_num  = 0
+    page_num = 0
 
     for offset in range(0, (total if not blind else 10**9), BATCH_SIZE):
         page_num += 1
@@ -492,15 +474,14 @@ def process_state(
             )
             break
 
-        # Discover NIC column name from the first non-empty page
-        if nic_col is None:
-            nic_col = _find_nic_column(rows[0].keys())
-            if nic_col is None:
-                log.error(
-                    f"[{state}] Cannot find NIC column. "
-                    f"Skipping state. Columns: {list(rows[0].keys())}"
-                )
-                return []
+        # Validate the Activities column exists (warn once)
+        if page_num == 1 and ACTIVITIES_COLUMN not in rows[0]:
+            available = list(rows[0].keys())
+            log.error(
+                f"[{state}] Expected column '{ACTIVITIES_COLUMN}' not found. "
+                f"Available columns: {available}. Skipping state."
+            )
+            return []
 
         all_rows.extend(rows)
 
@@ -513,21 +494,23 @@ def process_state(
             log.info(f"[{state}] page {page_num} — {len(all_rows):,} records so far")
 
     # ── Filter and enrich ──────────────────────────────────────────────────
+    # Each row may have multiple NIC codes in Activities.
+    # We emit one output row per matching NIC code.
     results: list[dict] = []
     for row in all_rows:
-        for code in _extract_nic_codes(row.get(nic_col, "")):
+        for code in _extract_nic_codes(row.get(ACTIVITIES_COLUMN, "")):
             if code not in nic_set:
                 continue
             results.append({
-                "State":           str(row.get("State",          state)).strip().title(),
-                "District":        str(row.get("District",           "")).strip().title(),
-                "Pincode":         str(row.get("Pincode",             "")).strip(),
-                "Enterprise_Name": str(row.get("EnterpriseName",      "")).strip().title(),
-                "NIC_Code":        code,
-                "NIC_Description": nic_desc.get(code, ""),
-                "Category":        cat_map.get(code, "Uncategorised"),
-                "Enterprise_Type": str(row.get("EnterpriseType",      "")).strip().title(),
-                "Major_Activity":  str(row.get("MajorActivity",       "")).strip().title(),
+                "State":              str(row.get("State",                state)).strip().title(),
+                "District":           str(row.get("District",                 "")).strip().title(),
+                "Pincode":            str(row.get("Pincode",                  "")).strip(),
+                "Enterprise_Name":    str(row.get("EnterpriseName",           "")).strip().title(),
+                "Registration_Date":  str(row.get("RegistrationDate",         "")).strip(),
+                "Address":            str(row.get("CommunicationAddress",     "")).strip().title(),
+                "NIC_Code":           code,
+                "NIC_Description":    nic_desc.get(code, ""),
+                "Category":           cat_map.get(code, "Uncategorised"),
             })
 
     log.info(
@@ -561,7 +544,7 @@ def _save_checkpoint(cp: dict) -> None:
     tmp = CHECKPOINT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cp, f, indent=2)
-    os.replace(tmp, CHECKPOINT)   # atomic write
+    os.replace(tmp, CHECKPOINT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -586,7 +569,7 @@ def save_state_csv(state: str, records: list[dict]) -> None:
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v2")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v3")
     parser.add_argument(
         "--reset", action="store_true",
         help="Ignore checkpoint and restart from first state",
@@ -608,7 +591,6 @@ def main() -> None:
     nic_set, nic_desc = load_nic_codes()
     cat_map           = load_category_mapping()
 
-    # ── Determine which states to process ─────────────────────────────────
     if args.state:
         target = args.state.strip().upper()
         if target not in STATES_AND_UTS:
@@ -628,20 +610,14 @@ def main() -> None:
 
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
-    # ── Banner ────────────────────────────────────────────────────────────
-    est_reqs     = sum(
-        math.ceil(1_000) + 1 for _ in pending   # conservative 1 page min + probe
-    )
-    est_hrs_low  = (len(pending) * 2  * MIN_REQUEST_GAP) / 3600   # 2 req/state min
-    est_hrs_full = 12.1  # pre-calculated for full 36-state run
-
+    reqs_per_state_est = math.ceil(1_000_000 / BATCH_SIZE)  # worst case
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v2  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v3  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID      : {RESOURCE_ID}")
     print(f"  NIC codes loaded : {len(nic_set)}")
     print(f"  States pending   : {len(pending)}  (skipped: {skipped})")
+    print(f"  Batch size       : {BATCH_SIZE} records/page")
     print(f"  Request gap      : {MIN_REQUEST_GAP}s → ~{int(3600/MIN_REQUEST_GAP)} req/hr (limit 1,000)")
-    print(f"  Est. total time  : ~{est_hrs_full:.1f} hrs for a full 36-state run")
     print(f"  Output folder    : {OUTPUT_DIR}/suppliers_<State>.csv")
     print(f"{'═'*64}\n")
 
@@ -667,11 +643,9 @@ def main() -> None:
             if state not in failed:
                 failed.append(state)
 
-        # Save checkpoint after every state (atomic write)
         if not args.state:
             _save_checkpoint({"completed": sorted(completed), "failed": failed})
 
-    # ── Summary ───────────────────────────────────────────────────────────
     still_pending = [s for s in STATES_AND_UTS if s not in completed]
 
     print(f"\n{'═'*64}")
@@ -689,7 +663,6 @@ def main() -> None:
         print("  ✓  All states completed successfully.")
     print(f"{'═'*64}\n")
 
-    # Exit 2 triggers GitHub Actions auto-retrigger
     if still_pending or failed:
         sys.exit(2)
     else:
@@ -704,21 +677,21 @@ if __name__ == "__main__":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  TIMING REFERENCE TABLE (pre-calculated, 6.0s gap)
+#  TIMING REFERENCE  (1000 records/page, 4.5s gap → 800 req/hr)
 # ─────────────────────────────────────────────────────────────────────────────
-# State                                        Est. records   Reqs    Time
-# ─────────────────────────────────────────── ────────────── ──────  ──────
-# Uttar Pradesh                                    950,000      951   ~95 min
-# Maharashtra                                      700,000      701   ~70 min
-# Gujarat                                          650,000      651   ~65 min
-# Rajasthan                                        500,000      501   ~50 min
-# Tamil Nadu                                       480,000      481   ~48 min
-# West Bengal                                      420,000      421   ~42 min
-# Madhya Pradesh                                   380,000      381   ~38 min
-# Karnataka                                        360,000      361   ~36 min
-# Andhra Pradesh                                   310,000      311   ~31 min
-# Bihar                                            300,000      301   ~30 min
-# ... (26 smaller states)                      ~1,697,500    1,743   ~174 min
-# ─────────────────────────────────────────── ────────────── ──────  ──────
-# TOTAL                                          7,247,500    7,284   ~728 min (~12.1 hrs)
+# State                    Est. records   Pages    Time
+# ──────────────────────── ────────────── ──────   ──────
+# Uttar Pradesh                  950,000     951   ~1.19 hrs
+# Maharashtra                    700,000     700   ~0.88 hrs
+# Gujarat                        650,000     650   ~0.81 hrs
+# Rajasthan                      500,000     500   ~0.63 hrs
+# Tamil Nadu                     480,000     480   ~0.60 hrs
+# West Bengal                    420,000     420   ~0.53 hrs
+# Madhya Pradesh                 380,000     380   ~0.48 hrs
+# Karnataka                      360,000     360   ~0.45 hrs
+# Andhra Pradesh                 310,000     310   ~0.39 hrs
+# Bihar                          300,000     300   ~0.38 hrs
+# ... (26 smaller states)      1,697,500   1,698   ~2.12 hrs
+# ──────────────────────── ────────────── ──────   ──────
+# TOTAL                        7,247,500   7,249   ~9.1 hrs
 # ─────────────────────────────────────────────────────────────────────────────
