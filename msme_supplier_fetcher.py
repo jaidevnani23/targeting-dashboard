@@ -539,7 +539,6 @@ def main() -> None:
 
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
-    reqs_per_state_est = math.ceil(1_000_000 / BATCH_SIZE)  # worst case
     print(f"\n{'═'*64}")
     print(f"  MSME Supplier Fetcher  v3  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID      : {RESOURCE_ID}")
