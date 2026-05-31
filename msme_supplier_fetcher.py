@@ -54,7 +54,6 @@ import csv
 import io
 import json
 import logging
-import math
 import os
 import sys
 import time
@@ -70,7 +69,7 @@ from urllib3.util.retry import Retry
 # ─────────────────────────────────────────────────────────────────────────────
 API_KEY = os.environ.get(
     "DATA_GOV_API_KEY",
-    "579b464db66ec23bdd000001d2ecc2400ab74128657eb9c1309228b3",
+    "579b464db66ec23bdd0000015260684b497743176979a5132577de55",
 )
 RESOURCE_ID = os.environ.get(
     "DATA_GOV_RESOURCE_ID",
@@ -85,8 +84,7 @@ CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
 # FIX 6: 1000 records/page, 3s gap
 BATCH_SIZE    = 1000   # records per API page (reliable per live testing)
-TIMEOUT_PROBE = 15     # timeout for the initial total-count JSON probe
-TIMEOUT_PAGE  = 5      # timeout for subsequent CSV page fetches
+TIMEOUT_PAGE  = 5      # per-request socket timeout for CSV page fetches
 MAX_RETRIES   = 4      # application-level retry attempts
 RETRY_BASE    = 5      # urllib3 backoff base (seconds)
 
@@ -184,53 +182,10 @@ def _throttle() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  FETCH TOTAL  (JSON probe — 1 call per state)
-#  FIX 2: Returns -1 when total==0 to trigger blind pagination fallback.
+#  NO JSON PROBE — pure blind CSV pagination
+#  The JSON endpoint times out reliably. All calls use format=csv.
+#  process_state() simply fetches pages until it gets an empty one.
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_total(state: str) -> int:
-    params = {
-        "api-key":        API_KEY,
-        "format":         "json",
-        "limit":          1,
-        "offset":         0,
-        "filters[State]": state,
-    }
-    for attempt in range(1, MAX_RETRIES + 1):
-        _throttle()
-        try:
-            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_PROBE)
-
-            if resp.status_code == 429:
-                    f"(attempt {attempt}/{MAX_RETRIES})"
-                )
-                time.sleep(wait)
-                continue
-
-            resp.raise_for_status()
-            data  = resp.json()
-            total = int(data.get("total", 0))
-
-            if total == 0:
-                log.warning(
-                    f"[{state}] JSON probe returned total=0. "
-                    "Will attempt blind CSV pagination as fallback."
-                )
-                return -1   # FIX 2
-
-            log.info(f"[{state}] API total: {total:,} records "
-                     f"(~{math.ceil(total/BATCH_SIZE)} pages)")
-            return total
-
-        except Exception as exc:
-            wait = RETRY_BASE * (2 ** (attempt - 1))
-            log.warning(
-                f"[{state}] probe attempt {attempt}/{MAX_RETRIES}: "
-                f"{exc}. Retrying in {wait}s"
-            )
-            time.sleep(wait)
-
-    log.error(f"[{state}] Could not retrieve total after {MAX_RETRIES} attempts.")
-    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,32 +391,15 @@ def process_state(
     cat_map: dict[str, str],
 ) -> list[dict]:
     """
-    Fetch all pages for a state, filter by NIC codes, return result rows.
-
-    Actual API columns (confirmed from live response):
-        LG_ST_Code, State, LG_DT_Code, District, Pincode,
-        RegistrationDate, EnterpriseName, CommunicationAddress, Activities
-
-    FIX 2: If fetch_total returns -1, use blind pagination.
-    FIX 5: Map from actual column names; NIC codes from Activities column.
+    Fetch all pages for a state using blind CSV pagination — keep fetching
+    until an empty page is returned. No JSON probe needed.
     """
-    total = fetch_total(state)
-    blind = (total == -1)
-
-    if total == 0:
-        log.info(f"[{state}] No records — skipping.")
-        return []
-
-    if blind:
-        log.info(f"[{state}] Using blind pagination (total unknown).")
-    else:
-        expected_pages = math.ceil(total / BATCH_SIZE)
-        log.info(f"[{state}] {total:,} records → ~{expected_pages} pages")
+    log.info(f"[{state}] Starting blind CSV pagination.")
 
     all_rows: list[dict] = []
     page_num = 0
 
-    for offset in range(0, (total if not blind else 10**9), BATCH_SIZE):
+    for offset in range(0, 10**9, BATCH_SIZE):
         page_num += 1
         rows = fetch_page_csv(state, offset)
 
@@ -472,7 +410,7 @@ def process_state(
             )
             break
 
-        # Validate the Activities column exists (warn once)
+        # Validate Activities column exists (warn once on first page)
         if page_num == 1 and ACTIVITIES_COLUMN not in rows[0]:
             available = list(rows[0].keys())
             log.error(
@@ -482,14 +420,7 @@ def process_state(
             return []
 
         all_rows.extend(rows)
-
-        if not blind:
-            log.info(
-                f"[{state}] page {page_num}/{expected_pages}  "
-                f"({len(all_rows):,}/{total:,})"
-            )
-        else:
-            log.info(f"[{state}] page {page_num} — {len(all_rows):,} records so far")
+        log.info(f"[{state}] page {page_num} — {len(all_rows):,} records so far")
 
     # ── Filter and enrich ──────────────────────────────────────────────────
     # Each row may have multiple NIC codes in Activities.
