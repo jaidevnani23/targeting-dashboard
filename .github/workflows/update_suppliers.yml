@@ -20,11 +20,10 @@ jobs:
     name: Fetch MSME Suppliers
     runs-on: ubuntu-latest
     # 6 hours is the GitHub Actions hard ceiling.
-    # At 4s/request and ~4,500 total pages the happy-path run takes ~5 hrs.
-    # The retrigger job below handles anything that doesn't finish in time.
+    # At 4.5s/request and ~7,249 total pages the full run takes ~9 hrs.
+    # The retrigger job below handles continuation across multiple runs.
     timeout-minutes: 360
 
-    # Make the exit code available to the retrigger job that runs after this one.
     outputs:
       run_incomplete: ${{ steps.run_fetcher.outputs.incomplete }}
 
@@ -51,7 +50,8 @@ jobs:
       # ── Rate limit note ───────────────────────────────────────────────────
       # data.gov.in: 1,000 HTTP requests/hour per key (per request, not per
       # record).  BATCH_SIZE=1000 means each page fetch = 1 request.
-      # MIN_REQUEST_GAP=4.0s in the script → ~900 req/hr with 10% headroom.
+      # MIN_REQUEST_GAP=4.5s → ~800 req/hr with 20% headroom.
+      # TIMEOUT_PAGE=60s to account for US→India latency on GitHub runners.
       # If you see 429s in the logs, raise MIN_REQUEST_GAP in the script.
       # ─────────────────────────────────────────────────────────────────────
 
@@ -59,11 +59,6 @@ jobs:
         id: run_fetcher
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
-        # Exit codes from the script:
-        #   0 → all 36 states completed cleanly
-        #   2 → run ended with states still pending (timeout hit mid-run,
-        #        or some states failed); retrigger job will fire another run
-        #   anything else → hard error (missing file, bad API key, etc.)
         run: |
           RESET_FLAG=""
           if [ "${{ github.event.inputs.reset }}" = "true" ]; then
@@ -100,10 +95,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Pull latest so we don't clobber concurrent pushes (e.g. products workflow)
           git pull --rebase origin main
 
-          # Stage supplier data and the checkpoint (so the next run can resume)
           git add data/suppliers/
 
           if git diff --cached --quiet; then
@@ -117,14 +110,10 @@ jobs:
   # If fetch-suppliers exited with code 2 (states still pending), this job
   # fires a new workflow_dispatch run so the next run picks up the checkpoint
   # and continues from where this one left off.
-  #
-  # The loop terminates naturally once all 36 states are done and the script
-  # exits 0.  A full quarterly refresh may take 2–3 consecutive runs.
   retrigger-if-incomplete:
     name: Retrigger if run was incomplete
     needs: fetch-suppliers
     runs-on: ubuntu-latest
-    # Only fire when the fetcher signalled it didn't finish
     if: needs.fetch-suppliers.outputs.run_incomplete == 'true'
 
     steps:
@@ -133,13 +122,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Run was incomplete — triggering a continuation run."
-
-          # Small delay so the previous run's git push has time to land
-          # before the new run checks out the repo with the updated checkpoint.
           sleep 30
-
           gh workflow run update_suppliers.yml \
             --repo "${{ github.repository }}" \
             --ref  "${{ github.ref_name }}"
-
           echo "Continuation run triggered successfully."
