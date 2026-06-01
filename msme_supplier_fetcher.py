@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v3
+MSME Supplier Fetcher  —  Production v4.1
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -8,34 +8,65 @@ data/Demand_Excel_Filled.xlsx, and writes one
 per state.
 
 Rate limit: data.gov.in allows 1,000 requests/hour (rolling window).
-This script enforces a 15.0s minimum gap at 100 records/page →
-~240 req/hr, giving substantial headroom.
+This script enforces a 4.5s minimum gap → ~800 req/hr, giving ~20%
+headroom.
 
 Exit codes (read by GitHub Actions):
     0  — all states completed cleanly
     2  — states still pending (timeout/partial); workflow auto-retriggers
 
-FIXES vs v2
------------
-FIX 5 — Correct API response schema.
-    The API returns 9 columns:
-        LG_ST_Code, State, LG_DT_Code, District, Pincode,
-        RegistrationDate, EnterpriseName, CommunicationAddress, Activities
-    EnterpriseType and MajorActivity do NOT exist in the response.
-    NIC codes live in the 'Activities' column as a JSON array:
-        [{"NIC5DigitId":"14101","Description":"Manufacture of ..."}]
-    Previous code looked for columns with "nic" in the name — none exist.
-    _find_nic_column() is replaced with a constant; _extract_nic_codes()
-    now parses the JSON array format (with CSV double-quote escaping).
+CHANGES vs v3  (v4)
+-------------------
+FIX 7 — Per-page checkpointing so no work is lost on mid-run interruption.
 
-FIX 6 — Batch size reduced to 100, gap increased to 15s.
-    Per user testing, 100 records/page is reliable.
-    15s gap → ~240 req/hr, well within the 1,000/hr limit.
+    Problem (v3): the checkpoint only recorded fully completed states.
+    If the runner was killed mid-state (e.g. GitHub Actions 6-hr timeout),
+    the entire in-progress state had to be refetched from offset 0 on the
+    next run.  For large states (UP ~951 pages, MH ~700 pages) that meant
+    throwing away hours of work.
 
-FIX 1 — (retained) urllib3 Retry excludes 429 from status_forcelist.
-FIX 2 — (retained) fallback blind pagination when total==0.
-FIX 3 — (removed, superseded by FIX 5) NIC column detection.
-FIX 4 — (retained) 429 backoff: 120 + 60*attempt seconds.
+    Solution (v4):
+      • The checkpoint now records the current state AND the last
+        successfully written page offset:
+            {
+              "completed":      ["ASSAM", ...],
+              "failed":         [],
+              "in_progress":    {
+                "state":        "UTTAR PRADESH",
+                "next_offset":  47000,
+                "csv_path":     "data/suppliers/suppliers_Uttar_Pradesh.csv"
+              }
+            }
+      • Rows are appended to the state CSV one page at a time instead of
+        being held in memory until the state finishes.  The CSV is therefore
+        always current up to the last completed page.
+      • On resume, the script reads the in_progress block, seeks directly
+        to next_offset, and appends to the existing CSV.
+      • The workflow uses a shell trap (EXIT + SIGTERM) to run the git-commit
+        step even when the runner is killed by a timeout or cancellation,
+        ensuring the incremental CSVs and checkpoint reach the repo.
+
+    Net effect: the worst-case data loss is now one page (BATCH_SIZE records,
+    default 1000) rather than an entire state.
+
+FIX 8 — Verify partial CSV exists before trusting a saved offset.  (v4.1)
+
+    Problem: if the fetcher was killed hard enough that the workflow trap did
+    not fire (e.g. OOM before SIGTERM), the checkpoint JSON was already
+    committed to the repo (written per-page) but the partial CSV was not.
+    On the next run, process_state() would blindly seek to next_offset on a
+    fresh runner where the CSV does not exist, silently skipping those records.
+
+    Solution: before trusting the saved offset, confirm the CSV exists and is
+    non-empty on the current runner.  If absent, log a warning and restart
+    that state from offset 0.
+
+Earlier fixes (retained from v3):
+    FIX 1 — urllib3 Retry excludes 429 from status_forcelist.
+    FIX 2 — fallback blind pagination when total==0.
+    FIX 4 — 429 backoff: 120 + 60*attempt seconds.
+    FIX 5 — NIC codes parsed from Activities JSON column.
+    FIX 6 — Batch size 1000, gap 4.5s.
 
 Requirements:
     pip install requests pandas openpyxl
@@ -79,29 +110,36 @@ RESOURCE_ID = os.environ.get(
 )
 BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
-# Paths work for both local (flat) and GitHub (data/ subfolder) layouts
 _BASE = "data" if os.path.isdir("data") else "."
 NIC_CODES_FILE = os.path.join(_BASE, "Key_NIC_Codes_List.xlsx")
 DEMAND_FILE    = os.path.join(_BASE, "Demand_Excel_Filled.xlsx")
 OUTPUT_DIR     = os.path.join(_BASE, "suppliers")
 CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
-# FIX 6: 1000 records/page, 3s gap
-BATCH_SIZE    = 1000   # records per API page (reliable per live testing)
-TIMEOUT_PAGE  = 60     # per-request socket timeout (high for GitHub Actions → Indian govt API latency)
-MAX_RETRIES   = 4      # application-level retry attempts
-RETRY_BASE    = 5      # urllib3 backoff base (seconds)
-
-# FIX 6: 4.5s gap → ~800 req/hr (limit is 1,000/hr, ~20% headroom)
+BATCH_SIZE      = 1000
+TIMEOUT_PAGE    = 60
+MAX_RETRIES     = 4
+RETRY_BASE      = 5
 MIN_REQUEST_GAP: float = 4.5
 _last_request_at: float = 0.0
 
-# FIX 5: The NIC codes are in the 'Activities' column — always.
-# This is a constant, not something to detect dynamically.
 ACTIVITIES_COLUMN = "Activities"
 
+# CSV columns written to every state file — order is fixed so appends align.
+OUTPUT_COLUMNS = [
+    "State",
+    "District",
+    "Pincode",
+    "Enterprise_Name",
+    "Registration_Date",
+    "Address",
+    "NIC_Code",
+    "NIC_Description",
+    "Category",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  STATES / UTs  (36 total)
+#  STATES / UTs
 # ─────────────────────────────────────────────────────────────────────────────
 STATES_AND_UTS: list[str] = [
     "ANDAMAN AND NICOBAR ISLANDS",
@@ -154,12 +192,15 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTTP SESSION
-#  FIX 1: 429 excluded from status_forcelist — handled in app layer only.
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
         "Accept": "text/csv",
     })
     retry = Retry(
@@ -190,20 +231,12 @@ def _throttle() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NO JSON PROBE — pure blind CSV pagination
-#  The JSON endpoint times out reliably. All calls use format=csv.
-#  process_state() simply fetches pages until it gets an empty one.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  FETCH ONE CSV PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_page_csv(state: str, offset: int) -> list[dict]:
     """
     Fetch one batch of records as CSV. Returns [] on empty page (end of data).
     Raises RuntimeError after MAX_RETRIES failures.
-    FIX 4: 429 backoff is 120 + 60*attempt seconds.
     """
     params = {
         "api-key":        API_KEY,
@@ -216,10 +249,12 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
     for attempt in range(1, MAX_RETRIES + 1):
         _throttle()
         try:
-            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_PAGE, verify=False)
+            resp = SESSION.get(
+                BASE_URL, params=params, timeout=TIMEOUT_PAGE, verify=False
+            )
 
             if resp.status_code == 429:
-                wait = 120 + (60 * attempt)   # FIX 4
+                wait = 120 + (60 * attempt)
                 log.warning(
                     f"[{state}] offset={offset} → 429 rate-limited. "
                     f"Waiting {wait}s ({wait/60:.1f} min) "
@@ -289,7 +324,10 @@ def load_nic_codes() -> tuple[set[str], dict[str, str]]:
         dict(zip(df[code_col], df[desc_col].fillna(""))) if desc_col else {}
     )
 
-    log.info(f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE} (col: {code_col!r})")
+    log.info(
+        f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE} "
+        f"(col: {code_col!r})"
+    )
     return nic_set, nic_desc
 
 
@@ -336,35 +374,21 @@ def load_category_mapping() -> dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NIC CODE EXTRACTION  (FIX 5)
-#
-#  The API returns NIC codes in the 'Activities' column as a JSON array:
-#      [{"NIC5DigitId":"14101","Description":"Manufacture of ..."}]
-#
-#  CSV double-quote escaping means embedded quotes appear as "":
-#      "[{""NIC5DigitId"":""14101"","Description"":""Manufacture...""}]"
-#  Python's csv.DictReader already unescapes these before we see them,
-#  so by the time the value reaches this function it is valid JSON.
+#  NIC CODE EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
 def _extract_nic_codes(raw_value) -> list[str]:
     """
     Parse all 5-digit NIC codes from the Activities column value.
 
     Handles:
-      - JSON array (current API format):
-            [{"NIC5DigitId":"14101","Description":"..."}]
-      - Multiple codes in one row:
-            [{"NIC5DigitId":"32409","Description":"..."},
-             {"NIC5DigitId":"16296","Description":"..."}]
-      - Legacy plain-text fallback (kept for safety):
-            "1) 14101; 2) 22199"
+      - JSON array:  [{"NIC5DigitId":"14101","Description":"..."}]
+      - Legacy plain-text fallback: "1) 14101; 2) 22199"
     """
     if not raw_value or str(raw_value).strip() in ("", "nan", "NA"):
         return []
 
     text = str(raw_value).strip()
 
-    # ── Primary path: JSON array ──────────────────────────────────────────
     if text.startswith("["):
         try:
             entries = json.loads(text)
@@ -375,10 +399,11 @@ def _extract_nic_codes(raw_value) -> list[str]:
                     codes.append(code.zfill(5))
             return codes
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
-            log.debug(f"JSON parse failed for Activities value, falling back: {exc}")
-            # fall through to legacy parser
+            log.debug(
+                f"JSON parse failed for Activities value, falling back: {exc}"
+            )
 
-    # ── Fallback: legacy semicolon-separated plain text ───────────────────
+    # Legacy semicolon-separated plain text
     codes = []
     for part in text.split(";"):
         part = part.strip()
@@ -390,90 +415,91 @@ def _extract_nic_codes(raw_value) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PROCESS ONE STATE  (FIX 5: updated column mapping)
+#  FILTER RAW ROWS → OUTPUT DICTS
 # ─────────────────────────────────────────────────────────────────────────────
-def process_state(
+def _filter_rows(
     state: str,
+    raw_rows: list[dict],
     nic_set: set[str],
     nic_desc: dict[str, str],
     cat_map: dict[str, str],
 ) -> list[dict]:
-    """
-    Fetch all pages for a state using blind CSV pagination — keep fetching
-    until an empty page is returned. No JSON probe needed.
-    """
-    log.info(f"[{state}] Starting blind CSV pagination.")
-
-    all_rows: list[dict] = []
-    page_num = 0
-
-    for offset in range(0, 10**9, BATCH_SIZE):
-        page_num += 1
-        rows = fetch_page_csv(state, offset)
-
-        if not rows:
-            log.info(
-                f"[{state}] Empty page at offset={offset} — "
-                f"pagination complete ({len(all_rows):,} records fetched)."
-            )
-            break
-
-        # Validate Activities column exists (warn once on first page)
-        if page_num == 1 and ACTIVITIES_COLUMN not in rows[0]:
-            available = list(rows[0].keys())
-            log.error(
-                f"[{state}] Expected column '{ACTIVITIES_COLUMN}' not found. "
-                f"Available columns: {available}. Skipping state."
-            )
-            return []
-
-        all_rows.extend(rows)
-        log.info(f"[{state}] page {page_num} — {len(all_rows):,} records so far")
-
-    # ── Filter and enrich ──────────────────────────────────────────────────
-    # Each row may have multiple NIC codes in Activities.
-    # We emit one output row per matching NIC code.
+    """Filter and enrich a list of raw API rows into output dicts."""
     results: list[dict] = []
-    for row in all_rows:
+    for row in raw_rows:
         for code in _extract_nic_codes(row.get(ACTIVITIES_COLUMN, "")):
             if code not in nic_set:
                 continue
             results.append({
-                "State":              str(row.get("State",                state)).strip().title(),
-                "District":           str(row.get("District",                 "")).strip().title(),
-                "Pincode":            str(row.get("Pincode",                  "")).strip(),
-                "Enterprise_Name":    str(row.get("EnterpriseName",           "")).strip().title(),
-                "Registration_Date":  str(row.get("RegistrationDate",         "")).strip(),
-                "Address":            str(row.get("CommunicationAddress",     "")).strip().title(),
-                "NIC_Code":           code,
-                "NIC_Description":    nic_desc.get(code, ""),
-                "Category":           cat_map.get(code, "Uncategorised"),
+                "State":             str(row.get("State",              state)).strip().title(),
+                "District":          str(row.get("District",               "")).strip().title(),
+                "Pincode":           str(row.get("Pincode",                "")).strip(),
+                "Enterprise_Name":   str(row.get("EnterpriseName",         "")).strip().title(),
+                "Registration_Date": str(row.get("RegistrationDate",       "")).strip(),
+                "Address":           str(row.get("CommunicationAddress",   "")).strip().title(),
+                "NIC_Code":          code,
+                "NIC_Description":   nic_desc.get(code, ""),
+                "Category":          cat_map.get(code, "Uncategorised"),
             })
-
-    log.info(
-        f"[{state}] {len(results):,} matching supplier rows "
-        f"(from {len(all_rows):,} total records)"
-    )
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHECKPOINT HELPERS
+#  INCREMENTAL CSV WRITER  (FIX 7)
+#
+#  Appends rows to the state CSV immediately after each page is fetched so
+#  the file on disk is always current up to the last completed page.
+#  If the file doesn't exist yet, writes the header first.
+# ─────────────────────────────────────────────────────────────────────────────
+def _append_to_csv(path: str, records: list[dict]) -> None:
+    """Append records to a CSV, writing the header if the file is new."""
+    if not records:
+        return
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(records)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CHECKPOINT HELPERS  (FIX 7: extended schema)
+#
+#  Schema:
+#  {
+#    "completed":   ["STATE A", "STATE B", ...],   # fully done states
+#    "failed":      ["STATE C"],                   # errored states
+#    "in_progress": {                              # optional; set mid-state
+#      "state":       "UTTAR PRADESH",
+#      "next_offset": 47000,                       # offset to resume from
+#      "csv_path":    "data/suppliers/suppliers_Uttar_Pradesh.csv",
+#      "rows_written": 12340                       # matching rows so far
+#    }
+#  }
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_checkpoint() -> dict:
     if not os.path.exists(CHECKPOINT):
-        return {"completed": [], "failed": []}
+        return {"completed": [], "failed": [], "in_progress": None}
     try:
         with open(CHECKPOINT, encoding="utf-8") as f:
             data = json.load(f)
+        # Back-compat: v3 checkpoints lack "in_progress"
+        data.setdefault("in_progress", None)
+        ip = data["in_progress"]
         log.info(
             f"Checkpoint: {len(data.get('completed', []))} completed, "
-            f"{len(data.get('failed', []))} previously failed."
+            f"{len(data.get('failed', []))} previously failed"
+            + (
+                f", resuming {ip['state']} at offset {ip['next_offset']} "
+                f"({ip.get('rows_written', 0):,} rows already written)"
+                if ip else ""
+            )
         )
         return data
     except Exception as exc:
         log.warning(f"Could not read checkpoint ({exc}). Starting fresh.")
-        return {"completed": [], "failed": []}
+        return {"completed": [], "failed": [], "in_progress": None}
 
 
 def _save_checkpoint(cp: dict) -> None:
@@ -485,7 +511,7 @@ def _save_checkpoint(cp: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SAVE STATE CSV
+#  FILENAME HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 def _safe_filename(s: str) -> str:
     return (
@@ -495,18 +521,147 @@ def _safe_filename(s: str) -> str:
     )
 
 
-def save_state_csv(state: str, records: list[dict]) -> None:
+def _csv_path_for(state: str) -> str:
+    return os.path.join(
+        OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PROCESS ONE STATE  (FIX 7: per-page checkpoint + incremental CSV)
+# ─────────────────────────────────────────────────────────────────────────────
+def process_state(
+    state: str,
+    nic_set: set[str],
+    nic_desc: dict[str, str],
+    cat_map: dict[str, str],
+    cp: dict,
+    dry_run: bool = False,
+) -> int:
+    """
+    Fetch all pages for a state.  Appends matching rows to the state CSV
+    after every page and updates the checkpoint immediately, so an
+    interruption loses at most one page worth of work.
+
+    Returns the total number of matching rows written for this state.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv")
-    pd.DataFrame(records).to_csv(path, index=False, encoding="utf-8-sig")
-    log.info(f"[{state}] → saved {len(records):,} rows to {path}")
+    csv_path = _csv_path_for(state)
+
+    # ── Determine resume offset ───────────────────────────────────────────
+    ip = cp.get("in_progress") or {}
+    if ip.get("state") == state and ip.get("next_offset") is not None:
+        # FIX 8: verify the partial CSV actually exists on disk before
+        # trusting the saved offset.  If the trap failed to fire (e.g. OOM
+        # kill before SIGTERM) the checkpoint was committed but the CSV was
+        # not, so the file is absent on the fresh runner.  Blindly resuming
+        # at next_offset would silently skip offsets 0..next_offset-1 forever.
+        csv_present = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
+        if csv_present:
+            start_offset = ip["next_offset"]
+            rows_written = ip.get("rows_written", 0)
+            log.info(
+                f"[{state}] Resuming from offset={start_offset} "
+                f"({rows_written:,} rows already in {csv_path})"
+            )
+        else:
+            log.warning(
+                f"[{state}] Checkpoint claims offset={ip['next_offset']} but "
+                f"CSV is missing or empty on this runner — restarting from 0."
+            )
+            start_offset = 0
+            rows_written = 0
+    else:
+        start_offset = 0
+        rows_written = 0
+        # Fresh start for this state — remove any stale partial CSV
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+            log.info(f"[{state}] Removed stale CSV from previous attempt.")
+
+    # Mark this state as in-progress in the checkpoint immediately
+    if not dry_run:
+        cp["in_progress"] = {
+            "state":       state,
+            "next_offset": start_offset,
+            "csv_path":    csv_path,
+            "rows_written": rows_written,
+        }
+        _save_checkpoint(cp)
+
+    log.info(f"[{state}] Starting pagination from offset={start_offset}.")
+
+    total_raw    = 0
+    page_num     = 0
+    first_page   = True
+
+    for offset in range(start_offset, 10**9, BATCH_SIZE):
+        page_num += 1
+        rows = fetch_page_csv(state, offset)
+
+        if not rows:
+            log.info(
+                f"[{state}] Empty page at offset={offset} — "
+                f"pagination complete ({total_raw:,} raw records fetched)."
+            )
+            break
+
+        # Validate Activities column exists (warn once on first fetched page)
+        if first_page:
+            first_page = False
+            if ACTIVITIES_COLUMN not in rows[0]:
+                available = list(rows[0].keys())
+                log.error(
+                    f"[{state}] Expected column '{ACTIVITIES_COLUMN}' not found. "
+                    f"Available columns: {available}. Skipping state."
+                )
+                # Clear in_progress so we don't resume into a broken state
+                cp["in_progress"] = None
+                if not dry_run:
+                    _save_checkpoint(cp)
+                return rows_written
+
+        total_raw += len(rows)
+
+        # Filter and enrich this page's rows
+        page_records = _filter_rows(state, rows, nic_set, nic_desc, cat_map)
+
+        # ── Persist immediately (FIX 7) ───────────────────────────────────
+        if not dry_run and page_records:
+            _append_to_csv(csv_path, page_records)
+
+        rows_written += len(page_records)
+        next_offset   = offset + BATCH_SIZE
+
+        # Update checkpoint after every page
+        if not dry_run:
+            cp["in_progress"] = {
+                "state":        state,
+                "next_offset":  next_offset,
+                "csv_path":     csv_path,
+                "rows_written": rows_written,
+            }
+            _save_checkpoint(cp)
+
+        log.info(
+            f"[{state}] page {page_num} (offset={offset}) — "
+            f"{len(page_records)} matches this page, "
+            f"{rows_written:,} total written, "
+            f"{total_raw:,} raw records fetched"
+        )
+
+    log.info(
+        f"[{state}] Complete — {rows_written:,} matching supplier rows "
+        f"(from {total_raw:,} total records)"
+    )
+    return rows_written
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v3")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v4.1")
     parser.add_argument(
         "--reset", action="store_true",
         help="Ignore checkpoint and restart from first state",
@@ -536,19 +691,30 @@ def main() -> None:
                 + "\n  ".join(STATES_AND_UTS)
             )
             sys.exit(1)
+        cp        = {"completed": [], "failed": [], "in_progress": None}
         pending   = [target]
-        completed: set[str] = set()
-        failed:    list[str] = []
     else:
-        cp        = {} if args.reset else _load_checkpoint()
+        if args.reset:
+            cp = {"completed": [], "failed": [], "in_progress": None}
+            log.info("Reset flag set — ignoring any existing checkpoint.")
+        else:
+            cp = _load_checkpoint()
+
         completed = set(cp.get("completed", []))
-        failed    = list(cp.get("failed",    []))
-        pending   = [s for s in STATES_AND_UTS if s not in completed]
+
+        # If a state was in_progress, put it first in pending so we resume it
+        # before moving on to states we haven't started yet.
+        ip_state  = (cp.get("in_progress") or {}).get("state")
+        remaining = [s for s in STATES_AND_UTS if s not in completed]
+        if ip_state and ip_state in remaining:
+            pending = [ip_state] + [s for s in remaining if s != ip_state]
+        else:
+            pending = remaining
 
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v3  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v4  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID      : {RESOURCE_ID}")
     print(f"  NIC codes loaded : {len(nic_set)}")
     print(f"  States pending   : {len(pending)}  (skipped: {skipped})")
@@ -562,39 +728,49 @@ def main() -> None:
     for i, state in enumerate(pending, 1):
         log.info(f"[{i:02d}/{len(pending)}] ── {state.title()} ──")
         try:
-            records = process_state(state, nic_set, nic_desc, cat_map)
+            rows_written = process_state(
+                state, nic_set, nic_desc, cat_map, cp, dry_run=args.dry_run
+            )
+            total_suppliers += rows_written
 
-            if not args.dry_run:
-                if records:
-                    save_state_csv(state, records)
-                else:
-                    log.info(f"[{state}] No matching suppliers — no file written.")
+            # Mark fully completed
+            completed_list = cp.get("completed", [])
+            if state not in completed_list:
+                completed_list.append(state)
+            cp["completed"]  = sorted(completed_list)
+            cp["failed"]     = [s for s in cp.get("failed", []) if s != state]
+            cp["in_progress"] = None
 
-            total_suppliers += len(records)
-            completed.add(state)
-            failed = [s for s in failed if s != state]
+            if not args.state and not args.dry_run:
+                _save_checkpoint(cp)
 
         except Exception as exc:
             log.error(f"[{state}] FAILED: {exc}")
+            failed = cp.get("failed", [])
             if state not in failed:
                 failed.append(state)
+            cp["failed"] = failed
+            # Leave in_progress intact so partial CSV + offset are preserved;
+            # the next run will retry from where this page left off.
+            if not args.state and not args.dry_run:
+                _save_checkpoint(cp)
 
-        if not args.state:
-            _save_checkpoint({"completed": sorted(completed), "failed": failed})
-
-    still_pending = [s for s in STATES_AND_UTS if s not in completed]
+    completed_set = set(cp.get("completed", []))
+    still_pending = [s for s in STATES_AND_UTS if s not in completed_set]
+    failed        = cp.get("failed", [])
 
     print(f"\n{'═'*64}")
     print(f"  Total supplier rows saved : {total_suppliers:,}")
     print(f"  Output folder             : {OUTPUT_DIR}/")
     if failed:
-        print(f"\n  States FAILED (retried automatically on next run):")
+        print(f"\n  States FAILED (will retry on next run):")
         for s in failed:
             print(f"    ✗  {s.title()}")
     if still_pending:
         print(f"\n  States still pending (not reached in this run):")
         for s in still_pending:
-            print(f"    ○  {s.title()}")
+            marker = "↺" if s == (cp.get("in_progress") or {}).get("state") else "○"
+            print(f"    {marker}  {s.title()}")
     if not failed and not still_pending:
         print("  ✓  All states completed successfully.")
     print(f"{'═'*64}\n")
