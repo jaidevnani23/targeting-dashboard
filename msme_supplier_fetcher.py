@@ -79,14 +79,16 @@ RESOURCE_ID = os.environ.get(
 )
 BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
-NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
-DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
-OUTPUT_DIR     = "data/suppliers"
+# Paths work for both local (flat) and GitHub (data/ subfolder) layouts
+_BASE = "data" if os.path.isdir("data") else "."
+NIC_CODES_FILE = os.path.join(_BASE, "Key_NIC_Codes_List.xlsx")
+DEMAND_FILE    = os.path.join(_BASE, "Demand_Excel_Filled.xlsx")
+OUTPUT_DIR     = os.path.join(_BASE, "suppliers")
 CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
 # FIX 6: 1000 records/page, 3s gap
 BATCH_SIZE    = 1000   # records per API page (reliable per live testing)
-TIMEOUT_PAGE  = 30     # per-request socket timeout for CSV page fetches
+TIMEOUT_PAGE  = 60     # per-request socket timeout (high for GitHub Actions → Indian govt API latency)
 MAX_RETRIES   = 4      # application-level retry attempts
 RETRY_BASE    = 5      # urllib3 backoff base (seconds)
 
@@ -156,6 +158,10 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_session() -> requests.Session:
     s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/csv",
+    })
     retry = Retry(
         total=3,
         backoff_factor=2,
