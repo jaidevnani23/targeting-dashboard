@@ -25,7 +25,10 @@ jobs:
     timeout-minutes: 360
 
     outputs:
-      run_incomplete: ${{ steps.run_fetcher.outputs.incomplete }}
+      # Defaults to 'true' — only set to 'false' on a clean complete run.
+      # This means a timeout (which kills the step before it can write any
+      # output) is correctly treated as incomplete and triggers a continuation.
+      run_incomplete: ${{ steps.mark_complete.outputs.incomplete || 'true' }}
 
     steps:
       - name: Checkout repo
@@ -47,19 +50,47 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas openpyxl
 
-      # ── Rate limit note ───────────────────────────────────────────────────
-      # data.gov.in: 1,000 HTTP requests/hour per key (per request, not per
-      # record).  BATCH_SIZE=1000 means each page fetch = 1 request.
-      # MIN_REQUEST_GAP=4.5s → ~800 req/hr with 20% headroom.
-      # TIMEOUT_PAGE=60s to account for US→India latency on GitHub runners.
-      # If you see 429s in the logs, raise MIN_REQUEST_GAP in the script.
-      # ─────────────────────────────────────────────────────────────────────
-
+      # ── Fetch + commit in one shell ────────────────────────────────────────
+      # The trap and the fetcher MUST live in the same shell process.
+      # Each workflow `run:` block is a separate shell — a trap registered in
+      # one step does not carry over to the next step.
+      #
+      # Putting everything in one `run:` block means:
+      #   • trap '...' TERM  — fires on SIGTERM (GitHub timeout / UI cancel)
+      #   • trap '...' EXIT  — fires on any shell exit (errors, etc.)
+      # Both are guaranteed to run in the same process that ran the fetcher,
+      # so the commit always happens regardless of how the job ends.
+      #
+      # SIGKILL (kill -9) still cannot be trapped — nothing can — but GitHub
+      # Actions sends SIGTERM first and waits ~30s before escalating, which
+      # is more than enough time to commit and push.
+      # ──────────────────────────────────────────────────────────────────────
       - name: Run MSME supplier fetcher
-        id: run_fetcher
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
         run: |
+          # ── Commit function ──────────────────────────────────────────────
+          commit_and_push() {
+            echo "--- commit_and_push triggered (${1:-unknown}) ---"
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git pull --rebase origin main || true
+            git add data/suppliers/
+            if git diff --cached --quiet; then
+              echo "Nothing new to commit."
+            else
+              LABEL=$([ "$1" = "partial" ] && echo "partial" || echo "refresh")
+              git commit -m "chore(data): ${LABEL} supplier data [$(date -u +'%Y-%m-%d %H:%M UTC')]"
+              git push
+              echo "Committed and pushed supplier data."
+            fi
+          }
+
+          # ── Trap — fires on SIGTERM (timeout/cancel) and EXIT ────────────
+          trap 'commit_and_push partial' TERM
+          trap 'commit_and_push partial' EXIT
+
+          # ── Run fetcher ──────────────────────────────────────────────────
           RESET_FLAG=""
           if [ "${{ github.event.inputs.reset }}" = "true" ]; then
             RESET_FLAG="--reset"
@@ -67,19 +98,34 @@ jobs:
           fi
 
           python msme_supplier_fetcher.py $RESET_FLAG
-          EXIT_CODE=$?
+          FETCH_EXIT=$?
 
-          if [ $EXIT_CODE -eq 2 ]; then
-            echo "incomplete=true"  >> "$GITHUB_OUTPUT"
-            echo "Run ended with pending states — retrigger job will continue."
-          elif [ $EXIT_CODE -eq 0 ]; then
-            echo "incomplete=false" >> "$GITHUB_OUTPUT"
-            echo "All states completed successfully."
+          # Disarm the EXIT trap — commit explicitly below so the message
+          # reflects the actual outcome (partial vs refresh).
+          trap - EXIT
+
+          if [ $FETCH_EXIT -eq 2 ]; then
+            echo "Run ended with pending states — committing progress."
+            commit_and_push partial
+          elif [ $FETCH_EXIT -eq 0 ]; then
+            echo "All states completed — committing."
+            commit_and_push refresh
           else
-            echo "incomplete=false" >> "$GITHUB_OUTPUT"
-            echo "::error::Fetcher exited with code $EXIT_CODE — check logs above."
-            exit $EXIT_CODE
+            echo "::error::Fetcher exited with code $FETCH_EXIT — check logs above."
+            commit_and_push partial
+            exit $FETCH_EXIT
           fi
+
+      # ── Mark complete — only runs if fetcher finished cleanly ─────────────
+      # This step is intentionally separate. If the job times out, this step
+      # is skipped, so mark_complete.outputs.incomplete is never set.
+      # The job-level output expression falls back to 'true', which correctly
+      # triggers the retrigger job. Only a clean exit (fetcher returns 0)
+      # reaches this step and writes 'false' to stop the retrigger chain.
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Mark run complete
+        id: mark_complete
+        run: echo "incomplete=false" >> "$GITHUB_OUTPUT"
 
       - name: Verify output files were produced
         run: |
@@ -90,26 +136,9 @@ jobs:
             exit 1
           fi
 
-      - name: Commit and push supplier data
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git pull --rebase origin main
-
-          git add data/suppliers/
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit — data is already up to date."
-          else
-            git commit -m "chore(data): refresh supplier data [$(date -u +'%Y-%m-%d')]"
-            git push
-          fi
-
   # ── Retrigger job ──────────────────────────────────────────────────────────
-  # If fetch-suppliers exited with code 2 (states still pending), this job
-  # fires a new workflow_dispatch run so the next run picks up the checkpoint
-  # and continues from where this one left off.
+  # Fires whenever fetch-suppliers did not complete all states — including on
+  # timeout, where the step never gets to write any output at all.
   retrigger-if-incomplete:
     name: Retrigger if run was incomplete
     needs: fetch-suppliers
