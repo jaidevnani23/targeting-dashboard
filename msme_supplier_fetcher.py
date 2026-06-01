@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v4.1
+MSME Supplier Fetcher  —  Production v4.2
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -49,7 +49,19 @@ FIX 7 — Per-page checkpointing so no work is lost on mid-run interruption.
     Net effect: the worst-case data loss is now one page (BATCH_SIZE records,
     default 1000) rather than an entire state.
 
-FIX 8 — Verify partial CSV exists before trusting a saved offset.  (v4.1)
+FIX 9 — Python-side deadline replaces shell trap.  (v4.2)
+
+    Problem: shell traps registered in one `run:` step carry over when the
+    fetcher is backgrounded, but GitHub Actions cancellation sends SIGTERM
+    to the entire runner process group simultaneously, giving the trap no
+    reliable window to commit before SIGKILL escalation.
+
+    Solution: the script records its start time at import and checks elapsed
+    time after every page. At 5h 45m (RUN_DEADLINE_SECONDS=20700) it logs
+    the stop reason and exits with code 2, leaving 15 min inside the 6h job
+    ceiling for the workflow to commit and retrigger. The workflow no longer
+    needs a trap at all — the commit always happens via the normal exit path.
+    Override for local testing: RUN_DEADLINE_SECONDS=60 python msme_supplier_fetcher.py
 
     Problem: if the fetcher was killed hard enough that the workflow trap did
     not fire (e.g. OOM before SIGTERM), the checkpoint JSON was already
@@ -124,6 +136,16 @@ MIN_REQUEST_GAP: float = 4.5
 _last_request_at: float = 0.0
 
 ACTIVITIES_COLUMN = "Activities"
+
+# ── Run deadline (FIX 9) ──────────────────────────────────────────────────────
+# The script stops itself after RUN_DEADLINE_SECONDS and exits with code 2 so
+# the workflow can commit progress and retrigger cleanly — without relying on
+# OS signals or shell traps, which proved unreliable under GitHub Actions
+# timeouts. Set to 5h 45m (20,700s) to leave 15 min inside the 6h job ceiling
+# for the git commit + push and retrigger steps to complete.
+# Override via env var for local testing: RUN_DEADLINE_SECONDS=60 python ...
+RUN_DEADLINE_SECONDS: int = int(os.environ.get("RUN_DEADLINE_SECONDS", 20_700))
+_run_start: float = time.monotonic()
 
 # CSV columns written to every state file — order is fixed so appends align.
 OUTPUT_COLUMNS = [
@@ -650,6 +672,17 @@ def process_state(
             f"{total_raw:,} raw records fetched"
         )
 
+        # ── Deadline check (FIX 9) ────────────────────────────────────────
+        elapsed = time.monotonic() - _run_start
+        remaining = RUN_DEADLINE_SECONDS - elapsed
+        if remaining <= 0:
+            log.info(
+                f"[{state}] Deadline reached after {elapsed/3600:.2f}h — "
+                f"stopping at offset={next_offset} with checkpoint saved. "
+                f"Workflow will commit and retrigger."
+            )
+            return rows_written
+
     log.info(
         f"[{state}] Complete — {rows_written:,} matching supplier rows "
         f"(from {total_raw:,} total records)"
@@ -661,7 +694,7 @@ def process_state(
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v4.1")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v4.2")
     parser.add_argument(
         "--reset", action="store_true",
         help="Ignore checkpoint and restart from first state",
