@@ -20,13 +20,14 @@ jobs:
     name: Fetch MSME Suppliers
     runs-on: ubuntu-latest
     # Hard ceiling — safety net only. The script stops itself at 5h 45m
-    # (RUN_DEADLINE_SECONDS=20700), leaving 15 min for commit + retrigger.
+    # (RUN_DEADLINE_SECONDS=20700), leaving 15 min for commit.
     timeout-minutes: 360
 
     outputs:
-      # Set explicitly by the fetcher step to either 'true' or 'false'.
-      # Defaults to 'true' if the step never ran (e.g. job-level timeout
-      # killed the runner before the step could write output).
+      # 'true'  — deadline hit or states pending; retrigger should fire
+      # 'false' — all states complete; retrigger should not fire
+      # 'stop'  — stall limit hit (exit 3); retrigger chain should stop
+      # Defaults to 'true' if the step never ran (job-level timeout).
       run_incomplete: ${{ steps.run_fetcher.outputs.incomplete || 'true' }}
 
     steps:
@@ -50,22 +51,23 @@ jobs:
         run: pip install requests pandas openpyxl
 
       # ── Fetcher step ───────────────────────────────────────────────────────
-      # The script manages its own 5h 45m deadline and exits 2 when time is up,
-      # with every page already checkpointed to disk. This step normalises both
-      # exit codes (0 and 2) to a shell exit 0 so subsequent steps always run,
-      # and writes 'incomplete' to GITHUB_OUTPUT so the retrigger job knows
-      # whether to fire.
+      # Exit codes:
+      #   0 — all states done             → incomplete=false  (no retrigger)
+      #   2 — deadline / states pending   → incomplete=true   (retrigger)
+      #   3 — stall limit hit             → incomplete=stop   (no retrigger)
+      #   other — unexpected error        → step fails, commit skipped
       #
-      # Exit code meanings (from the script):
-      #   0  — all states finished cleanly
-      #   2  — deadline reached or states still pending; checkpoint is current
-      #   other — unexpected error; step fails, subsequent steps are skipped
+      # Output format: xlsx per state (FIX 14).
+      # Ephemeral CSVs are written to disk during pagination and converted
+      # to xlsx on state completion. Partial CSVs from deadline interrupts
+      # are discarded — the state re-fetches from offset 0 next run.
       # ──────────────────────────────────────────────────────────────────────
       - name: Run MSME supplier fetcher
         id: run_fetcher
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
-          RUN_DEADLINE_SECONDS: "20700"   # 5h 45m
+          RUN_DEADLINE_SECONDS: "20700"        # 5h 45m
+          MAX_RUNS_WITHOUT_PROGRESS: "3"
         run: |
           RESET_FLAG=""
           if [ "${{ github.event.inputs.reset }}" = "true" ]; then
@@ -82,51 +84,107 @@ jobs:
           elif [ $EXIT_CODE -eq 2 ]; then
             echo "Deadline reached — progress saved, continuation run will follow."
             echo "incomplete=true" >> "$GITHUB_OUTPUT"
-            # Do NOT exit non-zero — the commit step must still run.
+          elif [ $EXIT_CODE -eq 3 ]; then
+            echo "::warning::Stall limit hit — no states completed in too many consecutive runs."
+            echo "incomplete=stop" >> "$GITHUB_OUTPUT"
           else
             echo "::error::Fetcher exited with unexpected code $EXIT_CODE."
             echo "incomplete=true" >> "$GITHUB_OUTPUT"
-            exit $EXIT_CODE   # fail the step; commit is skipped on unexpected errors
+            exit $EXIT_CODE
           fi
 
-      # Runs after both exit 0 and exit 2 because the fetcher step above
-      # always exits 0 in those cases.
+      # ── Commit checkpoint + completed xlsx files ───────────────────────────
+      # Only commits:
+      #   - data/suppliers/fetch_checkpoint.json  (resume state)
+      #   - data/suppliers/suppliers_*.xlsx       (completed states only)
+      #
+      # Ephemeral CSVs are never committed — they only exist on the runner
+      # and are cleaned up by the script on deadline or state completion.
+      # ──────────────────────────────────────────────────────────────────────
       - name: Commit and push supplier data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git pull --rebase origin main
-          git add data/suppliers/
+          git add data/suppliers/fetch_checkpoint.json 2>/dev/null || true
+          git add data/suppliers/suppliers_*.xlsx 2>/dev/null || true
+
           if git diff --cached --quiet; then
             echo "No changes to commit — data already up to date."
-          else
-            git commit -m "chore(data): partial supplier data [$(date -u +'%Y-%m-%d %H:%M UTC')]"
-            git push
-            echo "Committed and pushed supplier data."
+            exit 0
           fi
+
+          git commit -m "chore(data): supplier data update [$(date -u +'%Y-%m-%d %H:%M UTC')]"
+
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "Push succeeded on attempt $attempt."
+              exit 0
+            fi
+            WAIT=$(( attempt * attempt * 10 ))   # 10s, 40s, 90s
+            echo "Push failed (attempt $attempt/3) — waiting ${WAIT}s then re-pulling."
+            sleep $WAIT
+            git pull --rebase origin main
+          done
+
+          echo "::error::git push failed after 3 attempts — checkpoint not saved to repo."
+          exit 1
 
       - name: Verify output files were produced
         run: |
-          count=$(find data/suppliers -name "suppliers_*.csv" 2>/dev/null | wc -l)
-          echo "Supplier CSV files present: $count"
+          count=$(find data/suppliers -name "suppliers_*.xlsx" 2>/dev/null | wc -l)
+          echo "Supplier xlsx files present: $count"
           if [ "$count" -eq 0 ]; then
             echo "::error::No supplier files found — check API key and script logs."
             exit 1
           fi
 
   # ── Retrigger job ──────────────────────────────────────────────────────────
-  # Fires when run_incomplete == 'true'.
+  # Fires only when:
+  #   - run_incomplete == 'true'  (deadline hit, more states pending)
+  #   - fetch-suppliers was NOT manually cancelled
+  #
+  # Does NOT fire when:
+  #   - run_incomplete is 'false' (all done)
+  #   - run_incomplete is 'stop'  (stall limit hit)
+  #   - fetch-suppliers was cancelled by a user (result == 'cancelled')
+  #
   # always() is required — without it GitHub skips dependent jobs when the
-  # parent is cancelled or timed out, regardless of the if: condition.
+  # parent times out, regardless of the if: condition.
+  #
+  # MANUAL STOP: push a file at data/suppliers/STOP to halt the chain.
+  # Delete it and trigger manually to resume.
+  #
+  #   Stop:   touch data/suppliers/STOP && git add . && git commit -m "stop" && git push
+  #   Resume: git rm data/suppliers/STOP && git commit -m "resume" && git push
   # ──────────────────────────────────────────────────────────────────────────
   retrigger-if-incomplete:
     name: Retrigger if run was incomplete
     needs: fetch-suppliers
     runs-on: ubuntu-latest
-    if: always() && needs.fetch-suppliers.outputs.run_incomplete == 'true'
+    if: |
+      always() &&
+      needs.fetch-suppliers.result != 'cancelled' &&
+      needs.fetch-suppliers.outputs.run_incomplete == 'true'
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Check for stop sentinel
+        id: check_stop
+        run: |
+          if [ -f "data/suppliers/STOP" ]; then
+            echo "STOP file found — retrigger chain halted by user request."
+            echo "stopped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No STOP file — continuing with retrigger."
+            echo "stopped=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Wait 20 minutes then trigger continuation run
+        if: steps.check_stop.outputs.stopped == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
