@@ -1,0 +1,19 @@
+{
+  "completed": [
+    "ANDAMAN AND NICOBAR ISLANDS",
+    "ANDHRA PRADESH",
+    "ARUNACHAL PRADESH",
+    "ASSAM",
+    "BIHAR",
+    "CHANDIGARH"
+  ],
+  "failed": [],
+  "in_progress": {
+    "state": "CHHATTISGARH",
+    "next_offset": 209000,
+    "csv_path": "data/suppliers/suppliers_Chhattisgarh.csv",
+    "xlsx_path": "data/suppliers/suppliers_Chhattisgarh.xlsx",
+    "rows_written": 23424
+  },
+  "runs_without_progress": 0
+}
