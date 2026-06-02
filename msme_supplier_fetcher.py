@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v6
+MSME Supplier Fetcher  —  Production v7
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -16,25 +16,29 @@ Exit codes (read by GitHub Actions):
     2  — states still pending (deadline/partial); workflow auto-retriggers
     3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v5  (v6)
+CHANGES vs v6  (v7)
 ---------------------
-FIX 14 — Output format changed from CSV to XLSX.
+FIX 15 — Per-state git commit after each state xlsx is produced.
 
-    Problem: CSV files for large states exceed GitHub's 100 MB per-file
-    hard limit, making git storage impossible without LFS.
+    Problem: The workflow committed all xlsx files in a single step at the
+    end of the run. If the run hit the deadline or the job-level timeout,
+    completed xlsx files sitting on the runner's disk were never pushed to
+    the repo, resulting in zero data saved after a 6-hour run.
 
-    Solution: Each state is fetched into a temporary local CSV (using the
-    same atomic append + checkpoint logic from v5), then converted to xlsx
-    once the state is fully complete. The CSV is ephemeral — it only exists
-    on the runner's local disk and is deleted after conversion. Only the
-    final xlsx is committed to git.
+    Solution: After each state's CSV is converted to xlsx, the script
+    immediately commits and pushes that xlsx file via subprocess git calls.
+    The workflow's final commit step then only needs to handle the
+    checkpoint file. If a per-state push fails after retries, the xlsx
+    remains on disk and the workflow's final commit step picks it up as a
+    fallback.
 
-    Trade-off: A state interrupted mid-pagination by the deadline will have
-    its partial CSV discarded. Run 2 re-fetches that state from offset 0.
-    This is acceptable since the run is quarterly and correctness is
-    preserved — git only ever sees complete xlsx files per state.
+    Requirement: git user identity must be configured before the fetcher
+    runs. The workflow has a dedicated "Configure git" step BEFORE the
+    fetcher step. (Previously git config only appeared in the commit step
+    which ran after the fetcher, meaning all per-state commits inside the
+    script failed with "Author identity unknown".)
 
-Earlier fixes (retained from v5):
+Earlier fixes (retained from v6):
     FIX 1  — urllib3 Retry excludes 429 from status_forcelist.
     FIX 4  — 429 backoff: 120 + 60*attempt seconds.
     FIX 5  — NIC codes parsed from Activities JSON column.
@@ -46,6 +50,9 @@ Earlier fixes (retained from v5):
     FIX 11 — Validate page size before treating short pages as end-of-data.
     FIX 12 — Retry git push with exponential backoff (workflow).
     FIX 13 — Run-limit safety valve to stop infinite retrigger loops.
+    FIX 14 — Output format changed from CSV to XLSX.
+    FIX 15 — Per-state git commit after each state xlsx is produced.
+             git config must be set before this script runs (see workflow).
 
 Requirements:
     pip install requests pandas openpyxl
@@ -71,6 +78,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -407,17 +415,12 @@ def _append_to_csv(path: str, records: list[dict]) -> None:
     os.replace(tmp_path, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CSV → XLSX CONVERSION  (FIX 14)
-#
-#  Called once per state after all pages are fetched. Reads the ephemeral
-#  CSV into a DataFrame and writes it as xlsx, then deletes the CSV.
-#  Only the xlsx is committed to git.
+#  CSV → XLSX CONVERSION
 # ─────────────────────────────────────────────────────────────────────────────
 def _convert_csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
     """Convert the completed ephemeral CSV to xlsx and delete the CSV."""
     log.info(f"Converting {csv_path} → {xlsx_path} ...")
     df = pd.read_csv(csv_path, encoding="utf-8-sig", dtype=str)
-    # Ensure column order matches OUTPUT_COLUMNS
     for col in OUTPUT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -429,21 +432,70 @@ def _convert_csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
     log.info(f"Ephemeral CSV deleted: {csv_path}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHECKPOINT HELPERS
+#  PER-STATE GIT COMMIT  (FIX 15)
 #
-#  Schema v6 — same as v5, xlsx_path added to in_progress block:
-#  {
-#    "completed":              ["STATE A", ...],
-#    "failed":                 ["STATE C"],
-#    "runs_without_progress":  0,
-#    "in_progress": {
-#      "state":        "UTTAR PRADESH",
-#      "next_offset":  47000,
-#      "csv_path":     "/tmp/.../suppliers_Uttar_Pradesh.csv",
-#      "xlsx_path":    "data/suppliers/suppliers_Uttar_Pradesh.xlsx",
-#      "rows_written": 12340
-#    }
-#  }
+#  Called immediately after each state's xlsx is produced. Commits and
+#  pushes that single xlsx file so it is safely in the repo regardless of
+#  whether the overall run completes or the job times out.
+#
+#  IMPORTANT: git user identity (user.name / user.email) must be configured
+#  in the workflow BEFORE this script is invoked, otherwise the git commit
+#  call here will fail with "Author identity unknown". The workflow now has
+#  a dedicated "Configure git" step that runs before "Run MSME supplier
+#  fetcher".
+#
+#  If the push fails after all retries, we log an error but do NOT raise —
+#  the xlsx is still on disk and the workflow's final commit step will pick
+#  it up as a fallback.
+# ─────────────────────────────────────────────────────────────────────────────
+def _git_commit_xlsx(xlsx_path: str, state: str) -> None:
+    """Commit and push a single completed state xlsx file."""
+    try:
+        subprocess.run(["git", "add", xlsx_path], check=True)
+
+        # Check whether there is actually anything staged
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+        )
+        if diff.returncode == 0:
+            log.info(f"[{state}] xlsx already committed — nothing to push.")
+            return
+
+        subprocess.run(
+            [
+                "git", "commit", "-m",
+                f"chore(data): suppliers {state.title()} [auto]",
+            ],
+            check=True,
+        )
+        log.info(f"[{state}] xlsx committed locally.")
+
+    except subprocess.CalledProcessError as e:
+        log.error(f"[{state}] git add/commit failed: {e} — xlsx will be picked up by final commit step.")
+        return
+
+    # Push with retries
+    for attempt in range(1, 4):
+        try:
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=True)
+            subprocess.run(["git", "push"], check=True)
+            log.info(f"[{state}] xlsx pushed successfully (attempt {attempt}).")
+            return
+        except subprocess.CalledProcessError as e:
+            wait = attempt * attempt * 10   # 10s, 40s, 90s
+            log.warning(
+                f"[{state}] Push failed (attempt {attempt}/3): {e} — "
+                f"retrying in {wait}s."
+            )
+            time.sleep(wait)
+
+    log.error(
+        f"[{state}] Failed to push xlsx after 3 attempts. "
+        f"xlsx remains on disk and will be picked up by the workflow's final commit step."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CHECKPOINT HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_checkpoint() -> dict:
     if not os.path.exists(CHECKPOINT):
@@ -510,8 +562,10 @@ def process_state(
     Fetch all pages for a state.
     - Appends matching rows to an ephemeral CSV after every page.
     - Saves checkpoint after every page.
-    - On completion converts the CSV to xlsx and deletes the CSV.
-    - Raises DeadlineReached when the run time limit is hit (partial CSV discarded).
+    - On completion converts the CSV to xlsx, deletes the CSV, and
+      immediately commits + pushes the xlsx to the repo (FIX 15).
+    - Raises DeadlineReached when the run time limit is hit (partial
+      CSV is discarded; state re-fetches from offset 0 next run).
     Returns the number of matching rows written this session.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -649,7 +703,7 @@ def process_state(
                 f"stopping at offset={next_offset}. "
                 f"Partial CSV will be discarded; state will re-fetch next run."
             )
-            # Clean up partial CSV — don't leave half-built files around
+            # Clean up partial CSV
             for stale in [csv_path, csv_path + ".tmp"]:
                 if os.path.exists(stale):
                     os.remove(stale)
@@ -659,10 +713,11 @@ def process_state(
         if len(rows) < BATCH_SIZE:
             break
 
-    # ── State complete — convert CSV → xlsx ───────────────────────────────
+    # ── State complete — convert CSV → xlsx → commit ──────────────────────
     if not dry_run:
         if os.path.exists(csv_path):
             _convert_csv_to_xlsx(csv_path, xlsx_path)
+            _git_commit_xlsx(xlsx_path, state)
         else:
             log.info(f"[{state}] No matching rows — no xlsx produced.")
 
@@ -676,7 +731,7 @@ def process_state(
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v6")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v7")
     parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
     parser.add_argument("--state",   type=str, default=None, help="Run a single state")
     parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
@@ -723,7 +778,7 @@ def main() -> None:
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v6  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v7  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID           : {RESOURCE_ID}")
     print(f"  NIC codes loaded      : {len(nic_set)}")
     print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
