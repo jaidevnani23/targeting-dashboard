@@ -1,10 +1,10 @@
 """
-MSME Supplier Fetcher  —  Production v4.2
+MSME Supplier Fetcher  —  Production v6
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
 data/Demand_Excel_Filled.xlsx, and writes one
-    data/suppliers/suppliers_<State>.csv
+    data/suppliers/suppliers_<State>.xlsx
 per state.
 
 Rate limit: data.gov.in allows 1,000 requests/hour (rolling window).
@@ -13,72 +13,39 @@ headroom.
 
 Exit codes (read by GitHub Actions):
     0  — all states completed cleanly
-    2  — states still pending (timeout/partial); workflow auto-retriggers
+    2  — states still pending (deadline/partial); workflow auto-retriggers
+    3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v3  (v4)
--------------------
-FIX 7 — Per-page checkpointing so no work is lost on mid-run interruption.
+CHANGES vs v5  (v6)
+---------------------
+FIX 14 — Output format changed from CSV to XLSX.
 
-    Problem (v3): the checkpoint only recorded fully completed states.
-    If the runner was killed mid-state (e.g. GitHub Actions 6-hr timeout),
-    the entire in-progress state had to be refetched from offset 0 on the
-    next run.  For large states (UP ~951 pages, MH ~700 pages) that meant
-    throwing away hours of work.
+    Problem: CSV files for large states exceed GitHub's 100 MB per-file
+    hard limit, making git storage impossible without LFS.
 
-    Solution (v4):
-      • The checkpoint now records the current state AND the last
-        successfully written page offset:
-            {
-              "completed":      ["ASSAM", ...],
-              "failed":         [],
-              "in_progress":    {
-                "state":        "UTTAR PRADESH",
-                "next_offset":  47000,
-                "csv_path":     "data/suppliers/suppliers_Uttar_Pradesh.csv"
-              }
-            }
-      • Rows are appended to the state CSV one page at a time instead of
-        being held in memory until the state finishes.  The CSV is therefore
-        always current up to the last completed page.
-      • On resume, the script reads the in_progress block, seeks directly
-        to next_offset, and appends to the existing CSV.
-      • The workflow uses a shell trap (EXIT + SIGTERM) to run the git-commit
-        step even when the runner is killed by a timeout or cancellation,
-        ensuring the incremental CSVs and checkpoint reach the repo.
+    Solution: Each state is fetched into a temporary local CSV (using the
+    same atomic append + checkpoint logic from v5), then converted to xlsx
+    once the state is fully complete. The CSV is ephemeral — it only exists
+    on the runner's local disk and is deleted after conversion. Only the
+    final xlsx is committed to git.
 
-    Net effect: the worst-case data loss is now one page (BATCH_SIZE records,
-    default 1000) rather than an entire state.
+    Trade-off: A state interrupted mid-pagination by the deadline will have
+    its partial CSV discarded. Run 2 re-fetches that state from offset 0.
+    This is acceptable since the run is quarterly and correctness is
+    preserved — git only ever sees complete xlsx files per state.
 
-FIX 9 — Python-side deadline replaces shell trap.  (v4.2)
-
-    Problem: shell traps registered in one `run:` step carry over when the
-    fetcher is backgrounded, but GitHub Actions cancellation sends SIGTERM
-    to the entire runner process group simultaneously, giving the trap no
-    reliable window to commit before SIGKILL escalation.
-
-    Solution: the script records its start time at import and checks elapsed
-    time after every page. At 5h 45m (RUN_DEADLINE_SECONDS=20700) it logs
-    the stop reason and exits with code 2, leaving 15 min inside the 6h job
-    ceiling for the workflow to commit and retrigger. The workflow no longer
-    needs a trap at all — the commit always happens via the normal exit path.
-    Override for local testing: RUN_DEADLINE_SECONDS=60 python msme_supplier_fetcher.py
-
-    Problem: if the fetcher was killed hard enough that the workflow trap did
-    not fire (e.g. OOM before SIGTERM), the checkpoint JSON was already
-    committed to the repo (written per-page) but the partial CSV was not.
-    On the next run, process_state() would blindly seek to next_offset on a
-    fresh runner where the CSV does not exist, silently skipping those records.
-
-    Solution: before trusting the saved offset, confirm the CSV exists and is
-    non-empty on the current runner.  If absent, log a warning and restart
-    that state from offset 0.
-
-Earlier fixes (retained from v3):
-    FIX 1 — urllib3 Retry excludes 429 from status_forcelist.
-    FIX 2 — fallback blind pagination when total==0.
-    FIX 4 — 429 backoff: 120 + 60*attempt seconds.
-    FIX 5 — NIC codes parsed from Activities JSON column.
-    FIX 6 — Batch size 1000, gap 4.5s.
+Earlier fixes (retained from v5):
+    FIX 1  — urllib3 Retry excludes 429 from status_forcelist.
+    FIX 4  — 429 backoff: 120 + 60*attempt seconds.
+    FIX 5  — NIC codes parsed from Activities JSON column.
+    FIX 6  — Batch size 1000, gap 4.5s.
+    FIX 7  — Per-page checkpointing + incremental CSV writes.
+    FIX 8  — Verify CSV exists before trusting saved offset.
+    FIX 9  — Python-side deadline + DeadlineReached exception.
+    FIX 10 — Duplicate-row guard on CSV resume (atomic write).
+    FIX 11 — Validate page size before treating short pages as end-of-data.
+    FIX 12 — Retry git push with exponential backoff (workflow).
+    FIX 13 — Run-limit safety valve to stop infinite retrigger loops.
 
 Requirements:
     pip install requests pandas openpyxl
@@ -88,6 +55,12 @@ Usage:
     python msme_supplier_fetcher.py --reset       # ignore checkpoint
     python msme_supplier_fetcher.py --state DELHI # single state
     python msme_supplier_fetcher.py --dry-run     # fetch+filter, no writes
+
+Environment variables:
+    DATA_GOV_API_KEY         — API key (required in CI)
+    DATA_GOV_RESOURCE_ID     — override resource ID
+    RUN_DEADLINE_SECONDS     — override 5h 45m deadline (default 20700)
+    MAX_RUNS_WITHOUT_PROGRESS — override stall limit (default 3)
 """
 
 from __future__ import annotations
@@ -128,78 +101,48 @@ DEMAND_FILE    = os.path.join(_BASE, "Demand_Excel_Filled.xlsx")
 OUTPUT_DIR     = os.path.join(_BASE, "suppliers")
 CHECKPOINT     = os.path.join(OUTPUT_DIR, "fetch_checkpoint.json")
 
-BATCH_SIZE      = 1000
-TIMEOUT_PAGE    = 60
-MAX_RETRIES     = 4
-RETRY_BASE      = 5
+BATCH_SIZE         = 1000
+TIMEOUT_PAGE       = 60
+MAX_RETRIES        = 4
+RETRY_BASE         = 5
+SHORT_PAGE_RETRIES = 3
 MIN_REQUEST_GAP: float = 4.5
 _last_request_at: float = 0.0
 
 ACTIVITIES_COLUMN = "Activities"
 
-# ── Run deadline (FIX 9) ──────────────────────────────────────────────────────
-# The script stops itself after RUN_DEADLINE_SECONDS and exits with code 2 so
-# the workflow can commit progress and retrigger cleanly — without relying on
-# OS signals or shell traps, which proved unreliable under GitHub Actions
-# timeouts. Set to 5h 45m (20,700s) to leave 15 min inside the 6h job ceiling
-# for the git commit + push and retrigger steps to complete.
-# Override via env var for local testing: RUN_DEADLINE_SECONDS=60 python ...
+# ── Sentinel exceptions ───────────────────────────────────────────────────────
+class DeadlineReached(Exception):
+    """Script hit its time limit — exit cleanly with code 2."""
+
+class RunLimitReached(Exception):
+    """Too many consecutive runs with no progress — exit with code 3."""
+
+# ── Run deadline ──────────────────────────────────────────────────────────────
 RUN_DEADLINE_SECONDS: int = int(os.environ.get("RUN_DEADLINE_SECONDS", 20_700))
 _run_start: float = time.monotonic()
 
-# CSV columns written to every state file — order is fixed so appends align.
+# ── Stall limit ───────────────────────────────────────────────────────────────
+MAX_RUNS_WITHOUT_PROGRESS: int = int(os.environ.get("MAX_RUNS_WITHOUT_PROGRESS", 3))
+
+# ── Output columns ────────────────────────────────────────────────────────────
 OUTPUT_COLUMNS = [
-    "State",
-    "District",
-    "Pincode",
-    "Enterprise_Name",
-    "Registration_Date",
-    "Address",
-    "NIC_Code",
-    "NIC_Description",
-    "Category",
+    "State", "District", "Pincode", "Enterprise_Name",
+    "Registration_Date", "Address", "NIC_Code", "NIC_Description", "Category",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATES / UTs
 # ─────────────────────────────────────────────────────────────────────────────
 STATES_AND_UTS: list[str] = [
-    "ANDAMAN AND NICOBAR ISLANDS",
-    "ANDHRA PRADESH",
-    "ARUNACHAL PRADESH",
-    "ASSAM",
-    "BIHAR",
-    "CHANDIGARH",
-    "CHHATTISGARH",
-    "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
-    "DELHI",
-    "GOA",
-    "GUJARAT",
-    "HARYANA",
-    "HIMACHAL PRADESH",
-    "JAMMU AND KASHMIR",
-    "JHARKHAND",
-    "KARNATAKA",
-    "KERALA",
-    "LADAKH",
-    "LAKSHADWEEP",
-    "MADHYA PRADESH",
-    "MAHARASHTRA",
-    "MANIPUR",
-    "MEGHALAYA",
-    "MIZORAM",
-    "NAGALAND",
-    "ODISHA",
-    "PUDUCHERRY",
-    "PUNJAB",
-    "RAJASTHAN",
-    "SIKKIM",
-    "TAMIL NADU",
-    "TELANGANA",
-    "TRIPURA",
-    "UTTAR PRADESH",
-    "UTTARAKHAND",
-    "WEST BENGAL",
+    "ANDAMAN AND NICOBAR ISLANDS", "ANDHRA PRADESH", "ARUNACHAL PRADESH",
+    "ASSAM", "BIHAR", "CHANDIGARH", "CHHATTISGARH",
+    "DADRA AND NAGAR HAVELI AND DAMAN AND DIU", "DELHI", "GOA", "GUJARAT",
+    "HARYANA", "HIMACHAL PRADESH", "JAMMU AND KASHMIR", "JHARKHAND",
+    "KARNATAKA", "KERALA", "LADAKH", "LAKSHADWEEP", "MADHYA PRADESH",
+    "MAHARASHTRA", "MANIPUR", "MEGHALAYA", "MIZORAM", "NAGALAND", "ODISHA",
+    "PUDUCHERRY", "PUNJAB", "RAJASTHAN", "SIKKIM", "TAMIL NADU", "TELANGANA",
+    "TRIPURA", "UTTAR PRADESH", "UTTARAKHAND", "WEST BENGAL",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,23 +163,19 @@ def _build_session() -> requests.Session:
     s.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ),
         "Accept": "text/csv",
     })
     retry = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[500, 502, 503, 504],   # 429 intentionally excluded
-        allowed_methods=["GET"],
-        raise_on_status=False,
+        total=3, backoff_factor=2,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"], raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("https://", adapter)
     s.mount("http://",  adapter)
     return s
-
 
 SESSION = _build_session()
 
@@ -251,13 +190,15 @@ def _throttle() -> None:
         time.sleep(gap)
     _last_request_at = time.monotonic()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  FETCH ONE CSV PAGE
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_page_csv(state: str, offset: int) -> list[dict]:
+def fetch_page_csv(state: str, offset: int) -> tuple[list[dict], bool]:
     """
-    Fetch one batch of records as CSV. Returns [] on empty page (end of data).
+    Fetch one batch of records as CSV.
+    Returns (rows, is_last_page).
+    A short page (< BATCH_SIZE) is retried SHORT_PAGE_RETRIES times
+    before being accepted as the genuine last page.
     Raises RuntimeError after MAX_RETRIES failures.
     """
     params = {
@@ -271,16 +212,13 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
     for attempt in range(1, MAX_RETRIES + 1):
         _throttle()
         try:
-            resp = SESSION.get(
-                BASE_URL, params=params, timeout=TIMEOUT_PAGE, verify=False
-            )
+            resp = SESSION.get(BASE_URL, params=params, timeout=TIMEOUT_PAGE, verify=False)
 
             if resp.status_code == 429:
                 wait = 120 + (60 * attempt)
                 log.warning(
-                    f"[{state}] offset={offset} → 429 rate-limited. "
-                    f"Waiting {wait}s ({wait/60:.1f} min) "
-                    f"(attempt {attempt}/{MAX_RETRIES})"
+                    f"[{state}] offset={offset} → 429. "
+                    f"Waiting {wait}s (attempt {attempt}/{MAX_RETRIES})"
                 )
                 time.sleep(wait)
                 continue
@@ -289,20 +227,18 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
             text = resp.text.strip()
 
             if not text:
-                log.debug(f"[{state}] offset={offset} — empty body, end of data.")
-                return []
+                return [], True
 
             reader = csv.DictReader(io.StringIO(text))
             rows   = list(reader)
 
             if not rows:
-                log.debug(f"[{state}] offset={offset} — header-only CSV, end of data.")
-                return []
+                return [], True
 
             if offset == 0:
                 log.info(f"[{state}] CSV columns: {list(rows[0].keys())}")
 
-            return rows
+            return rows, False
 
         except (
             requests.exceptions.Timeout,
@@ -316,10 +252,7 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
             )
             time.sleep(wait)
 
-    raise RuntimeError(
-        f"[{state}] offset={offset} — failed after {MAX_RETRIES} attempts."
-    )
-
+    raise RuntimeError(f"[{state}] offset={offset} — failed after {MAX_RETRIES} attempts.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  REFERENCE FILE LOADERS
@@ -327,52 +260,33 @@ def fetch_page_csv(state: str, offset: int) -> list[dict]:
 def load_nic_codes() -> tuple[set[str], dict[str, str]]:
     df = pd.read_excel(NIC_CODES_FILE, dtype=str)
     df.columns = df.columns.str.strip()
-
     code_col = (
         next((c for c in df.columns if "nic" in c.lower() and "code" in c.lower()), None)
         or next((c for c in df.columns if "nic" in c.lower()), None)
     )
     if code_col is None:
-        raise ValueError(
-            f"No NIC code column found in {NIC_CODES_FILE}. "
-            f"Columns: {list(df.columns)}"
-        )
-
+        raise ValueError(f"No NIC code column in {NIC_CODES_FILE}. Columns: {list(df.columns)}")
     desc_col = next((c for c in df.columns if "desc" in c.lower()), None)
-
     df[code_col] = df[code_col].str.strip().str.zfill(5)
     nic_set  = set(df[code_col].dropna().tolist())
-    nic_desc = (
-        dict(zip(df[code_col], df[desc_col].fillna(""))) if desc_col else {}
-    )
-
-    log.info(
-        f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE} "
-        f"(col: {code_col!r})"
-    )
+    nic_desc = dict(zip(df[code_col], df[desc_col].fillna(""))) if desc_col else {}
+    log.info(f"Loaded {len(nic_set)} NIC codes from {NIC_CODES_FILE} (col: {code_col!r})")
     return nic_set, nic_desc
 
 
 def load_category_mapping() -> dict[str, str]:
     all_sheets = pd.read_excel(DEMAND_FILE, sheet_name=None)
     df = nic_col = cat_col = None
-
     for sheet_name, sheet_df in all_sheets.items():
         sheet_df.columns = sheet_df.columns.str.strip()
         _nic = next((c for c in sheet_df.columns if "nic" in c.lower()), None)
         _cat = next((c for c in sheet_df.columns if "cat" in c.lower()), None)
         if _nic and _cat:
             df, nic_col, cat_col = sheet_df, _nic, _cat
-            log.info(
-                f"Category mapping: sheet {sheet_name!r} "
-                f"(cols: {nic_col!r}, {cat_col!r})"
-            )
+            log.info(f"Category mapping: sheet {sheet_name!r} (cols: {nic_col!r}, {cat_col!r})")
             break
-
     if df is None:
-        raise ValueError(
-            f"No NIC/Category columns found in any sheet of {DEMAND_FILE}."
-        )
+        raise ValueError(f"No NIC/Category columns in any sheet of {DEMAND_FILE}.")
 
     def _norm(x) -> Optional[str]:
         s = str(x).strip()
@@ -390,27 +304,16 @@ def load_category_mapping() -> dict[str, str]:
         .agg(lambda x: x.mode().iloc[0])
         .to_dict()
     )
-
     log.info(f"Loaded {len(mapping)} NIC→Category mappings from {DEMAND_FILE}")
     return mapping
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  NIC CODE EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
 def _extract_nic_codes(raw_value) -> list[str]:
-    """
-    Parse all 5-digit NIC codes from the Activities column value.
-
-    Handles:
-      - JSON array:  [{"NIC5DigitId":"14101","Description":"..."}]
-      - Legacy plain-text fallback: "1) 14101; 2) 22199"
-    """
     if not raw_value or str(raw_value).strip() in ("", "nan", "NA"):
         return []
-
     text = str(raw_value).strip()
-
     if text.startswith("["):
         try:
             entries = json.loads(text)
@@ -421,11 +324,7 @@ def _extract_nic_codes(raw_value) -> list[str]:
                     codes.append(code.zfill(5))
             return codes
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
-            log.debug(
-                f"JSON parse failed for Activities value, falling back: {exc}"
-            )
-
-    # Legacy semicolon-separated plain text
+            log.debug(f"JSON parse failed for Activities value, falling back: {exc}")
     codes = []
     for part in text.split(";"):
         part = part.strip()
@@ -435,93 +334,140 @@ def _extract_nic_codes(raw_value) -> list[str]:
             codes.append(part.zfill(5))
     return codes
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  FILTER RAW ROWS → OUTPUT DICTS
 # ─────────────────────────────────────────────────────────────────────────────
 def _filter_rows(
-    state: str,
-    raw_rows: list[dict],
-    nic_set: set[str],
-    nic_desc: dict[str, str],
-    cat_map: dict[str, str],
+    state: str, raw_rows: list[dict],
+    nic_set: set[str], nic_desc: dict[str, str], cat_map: dict[str, str],
 ) -> list[dict]:
-    """Filter and enrich a list of raw API rows into output dicts."""
     results: list[dict] = []
     for row in raw_rows:
         for code in _extract_nic_codes(row.get(ACTIVITIES_COLUMN, "")):
             if code not in nic_set:
                 continue
             results.append({
-                "State":             str(row.get("State",              state)).strip().title(),
-                "District":          str(row.get("District",               "")).strip().title(),
-                "Pincode":           str(row.get("Pincode",                "")).strip(),
-                "Enterprise_Name":   str(row.get("EnterpriseName",         "")).strip().title(),
-                "Registration_Date": str(row.get("RegistrationDate",       "")).strip(),
-                "Address":           str(row.get("CommunicationAddress",   "")).strip().title(),
+                "State":             str(row.get("State",            state)).strip().title(),
+                "District":          str(row.get("District",             "")).strip().title(),
+                "Pincode":           str(row.get("Pincode",              "")).strip(),
+                "Enterprise_Name":   str(row.get("EnterpriseName",       "")).strip().title(),
+                "Registration_Date": str(row.get("RegistrationDate",     "")).strip(),
+                "Address":           str(row.get("CommunicationAddress", "")).strip().title(),
                 "NIC_Code":          code,
                 "NIC_Description":   nic_desc.get(code, ""),
                 "Category":          cat_map.get(code, "Uncategorised"),
             })
     return results
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  ATOMIC CSV APPEND  (ephemeral — local disk only, never committed)
+# ─────────────────────────────────────────────────────────────────────────────
+def _count_csv_rows(path: str) -> int:
+    """Return the number of data rows in a CSV (excludes header). 0 if absent."""
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return sum(1 for _ in f) - 1
+    except Exception:
+        return 0
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  INCREMENTAL CSV WRITER  (FIX 7)
-#
-#  Appends rows to the state CSV immediately after each page is fetched so
-#  the file on disk is always current up to the last completed page.
-#  If the file doesn't exist yet, writes the header first.
-# ─────────────────────────────────────────────────────────────────────────────
+
 def _append_to_csv(path: str, records: list[dict]) -> None:
-    """Append records to a CSV, writing the header if the file is new."""
+    """
+    Atomically append records to the ephemeral state CSV.
+    Writes to a staging file, fsyncs, then renames over the real path.
+    """
     if not records:
         return
-    write_header = not os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
-        if write_header:
-            writer.writeheader()
-        writer.writerows(records)
 
+    existing_rows: list[dict] = []
+    write_header = True
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                existing_rows = list(reader)
+            write_header = False
+        except Exception as exc:
+            log.warning(f"Could not read existing CSV {path} ({exc}) — will overwrite.")
+            existing_rows = []
+            write_header = True
+
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
+        writer.writeheader()
+        if existing_rows:
+            writer.writerows(existing_rows)
+        writer.writerows(records)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(tmp_path, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHECKPOINT HELPERS  (FIX 7: extended schema)
+#  CSV → XLSX CONVERSION  (FIX 14)
 #
-#  Schema:
+#  Called once per state after all pages are fetched. Reads the ephemeral
+#  CSV into a DataFrame and writes it as xlsx, then deletes the CSV.
+#  Only the xlsx is committed to git.
+# ─────────────────────────────────────────────────────────────────────────────
+def _convert_csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
+    """Convert the completed ephemeral CSV to xlsx and delete the CSV."""
+    log.info(f"Converting {csv_path} → {xlsx_path} ...")
+    df = pd.read_csv(csv_path, encoding="utf-8-sig", dtype=str)
+    # Ensure column order matches OUTPUT_COLUMNS
+    for col in OUTPUT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[OUTPUT_COLUMNS]
+    df.to_excel(xlsx_path, index=False, engine="openpyxl")
+    size_mb = os.path.getsize(xlsx_path) / 1024 / 1024
+    log.info(f"xlsx written: {xlsx_path} ({size_mb:.2f} MB, {len(df):,} rows)")
+    os.remove(csv_path)
+    log.info(f"Ephemeral CSV deleted: {csv_path}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CHECKPOINT HELPERS
+#
+#  Schema v6 — same as v5, xlsx_path added to in_progress block:
 #  {
-#    "completed":   ["STATE A", "STATE B", ...],   # fully done states
-#    "failed":      ["STATE C"],                   # errored states
-#    "in_progress": {                              # optional; set mid-state
-#      "state":       "UTTAR PRADESH",
-#      "next_offset": 47000,                       # offset to resume from
-#      "csv_path":    "data/suppliers/suppliers_Uttar_Pradesh.csv",
-#      "rows_written": 12340                       # matching rows so far
+#    "completed":              ["STATE A", ...],
+#    "failed":                 ["STATE C"],
+#    "runs_without_progress":  0,
+#    "in_progress": {
+#      "state":        "UTTAR PRADESH",
+#      "next_offset":  47000,
+#      "csv_path":     "/tmp/.../suppliers_Uttar_Pradesh.csv",
+#      "xlsx_path":    "data/suppliers/suppliers_Uttar_Pradesh.xlsx",
+#      "rows_written": 12340
 #    }
 #  }
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_checkpoint() -> dict:
     if not os.path.exists(CHECKPOINT):
-        return {"completed": [], "failed": [], "in_progress": None}
+        return {"completed": [], "failed": [], "in_progress": None, "runs_without_progress": 0}
     try:
         with open(CHECKPOINT, encoding="utf-8") as f:
             data = json.load(f)
-        # Back-compat: v3 checkpoints lack "in_progress"
         data.setdefault("in_progress", None)
+        data.setdefault("runs_without_progress", 0)
         ip = data["in_progress"]
         log.info(
             f"Checkpoint: {len(data.get('completed', []))} completed, "
-            f"{len(data.get('failed', []))} previously failed"
+            f"{len(data.get('failed', []))} failed, "
+            f"{data['runs_without_progress']} runs without progress"
             + (
                 f", resuming {ip['state']} at offset {ip['next_offset']} "
-                f"({ip.get('rows_written', 0):,} rows already written)"
+                f"({ip.get('rows_written', 0):,} rows written)"
                 if ip else ""
             )
         )
         return data
     except Exception as exc:
         log.warning(f"Could not read checkpoint ({exc}). Starting fresh.")
-        return {"completed": [], "failed": [], "in_progress": None}
+        return {"completed": [], "failed": [], "in_progress": None, "runs_without_progress": 0}
 
 
 def _save_checkpoint(cp: dict) -> None:
@@ -529,11 +475,12 @@ def _save_checkpoint(cp: dict) -> None:
     tmp = CHECKPOINT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cp, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, CHECKPOINT)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  FILENAME HELPER
+#  FILENAME HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def _safe_filename(s: str) -> str:
     return (
@@ -542,125 +489,147 @@ def _safe_filename(s: str) -> str:
         .replace("\\", "-").replace(":", "")
     )
 
-
 def _csv_path_for(state: str) -> str:
-    return os.path.join(
-        OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv"
-    )
+    """Ephemeral CSV — lives only on the runner's local disk."""
+    return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv")
 
+def _xlsx_path_for(state: str) -> str:
+    """Final output — committed to git."""
+    return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.xlsx")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PROCESS ONE STATE  (FIX 7: per-page checkpoint + incremental CSV)
+#  PROCESS ONE STATE
 # ─────────────────────────────────────────────────────────────────────────────
 def process_state(
     state: str,
-    nic_set: set[str],
-    nic_desc: dict[str, str],
-    cat_map: dict[str, str],
+    nic_set: set[str], nic_desc: dict[str, str], cat_map: dict[str, str],
     cp: dict,
     dry_run: bool = False,
 ) -> int:
     """
-    Fetch all pages for a state.  Appends matching rows to the state CSV
-    after every page and updates the checkpoint immediately, so an
-    interruption loses at most one page worth of work.
-
-    Returns the total number of matching rows written for this state.
+    Fetch all pages for a state.
+    - Appends matching rows to an ephemeral CSV after every page.
+    - Saves checkpoint after every page.
+    - On completion converts the CSV to xlsx and deletes the CSV.
+    - Raises DeadlineReached when the run time limit is hit (partial CSV discarded).
+    Returns the number of matching rows written this session.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    csv_path = _csv_path_for(state)
+    csv_path  = _csv_path_for(state)
+    xlsx_path = _xlsx_path_for(state)
 
     # ── Determine resume offset ───────────────────────────────────────────
     ip = cp.get("in_progress") or {}
     if ip.get("state") == state and ip.get("next_offset") is not None:
-        # FIX 8: verify the partial CSV actually exists on disk before
-        # trusting the saved offset.  If the trap failed to fire (e.g. OOM
-        # kill before SIGTERM) the checkpoint was committed but the CSV was
-        # not, so the file is absent on the fresh runner.  Blindly resuming
-        # at next_offset would silently skip offsets 0..next_offset-1 forever.
-        csv_present = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-        if csv_present:
-            start_offset = ip["next_offset"]
-            rows_written = ip.get("rows_written", 0)
-            log.info(
-                f"[{state}] Resuming from offset={start_offset} "
-                f"({rows_written:,} rows already in {csv_path})"
-            )
-        else:
+        saved_offset       = ip["next_offset"]
+        saved_rows_written = ip.get("rows_written", 0)
+        csv_row_count      = _count_csv_rows(csv_path)
+
+        if csv_row_count == 0:
             log.warning(
-                f"[{state}] Checkpoint claims offset={ip['next_offset']} but "
-                f"CSV is missing or empty on this runner — restarting from 0."
+                f"[{state}] Checkpoint claims offset={saved_offset} but CSV "
+                f"is empty/absent — restarting from 0."
             )
             start_offset = 0
             rows_written = 0
+        elif csv_row_count != saved_rows_written:
+            log.warning(
+                f"[{state}] CSV has {csv_row_count:,} rows but checkpoint "
+                f"says {saved_rows_written:,} — restarting from 0 to be safe."
+            )
+            if os.path.exists(csv_path):
+                os.remove(csv_path)
+            start_offset = 0
+            rows_written = 0
+        else:
+            start_offset = saved_offset
+            rows_written = saved_rows_written
+            log.info(
+                f"[{state}] Resuming from offset={start_offset} "
+                f"({rows_written:,} rows confirmed in CSV)"
+            )
     else:
         start_offset = 0
         rows_written = 0
-        # Fresh start for this state — remove any stale partial CSV
-        if os.path.exists(csv_path):
-            os.remove(csv_path)
-            log.info(f"[{state}] Removed stale CSV from previous attempt.")
+        # Clean up any stale files from a previous attempt
+        for stale in [csv_path, csv_path + ".tmp"]:
+            if os.path.exists(stale):
+                os.remove(stale)
+                log.info(f"[{state}] Removed stale file: {stale}")
 
-    # Mark this state as in-progress in the checkpoint immediately
     if not dry_run:
         cp["in_progress"] = {
-            "state":       state,
-            "next_offset": start_offset,
-            "csv_path":    csv_path,
+            "state": state, "next_offset": start_offset,
+            "csv_path": csv_path, "xlsx_path": xlsx_path,
             "rows_written": rows_written,
         }
         _save_checkpoint(cp)
 
     log.info(f"[{state}] Starting pagination from offset={start_offset}.")
 
-    total_raw    = 0
-    page_num     = 0
-    first_page   = True
+    total_raw         = 0
+    page_num          = 0
+    first_page        = True
+    short_page_streak = 0
 
     for offset in range(start_offset, 10**9, BATCH_SIZE):
         page_num += 1
-        rows = fetch_page_csv(state, offset)
+        rows, _ = fetch_page_csv(state, offset)
 
-        if not rows:
+        # ── End-of-data detection ─────────────────────────────────────────
+        if len(rows) == 0:
             log.info(
                 f"[{state}] Empty page at offset={offset} — "
                 f"pagination complete ({total_raw:,} raw records fetched)."
             )
             break
 
-        # Validate Activities column exists (warn once on first fetched page)
+        if len(rows) < BATCH_SIZE:
+            short_page_streak += 1
+            if short_page_streak <= SHORT_PAGE_RETRIES:
+                log.warning(
+                    f"[{state}] Short page ({len(rows)} rows) at offset={offset} "
+                    f"— may be truncated, retrying ({short_page_streak}/{SHORT_PAGE_RETRIES})."
+                )
+                time.sleep(RETRY_BASE * short_page_streak)
+                page_num -= 1
+                continue
+            else:
+                log.info(
+                    f"[{state}] Short page confirmed as last page after "
+                    f"{SHORT_PAGE_RETRIES} retries."
+                )
+        else:
+            short_page_streak = 0
+
+        # Validate Activities column (once, on first page)
         if first_page:
             first_page = False
             if ACTIVITIES_COLUMN not in rows[0]:
-                available = list(rows[0].keys())
                 log.error(
-                    f"[{state}] Expected column '{ACTIVITIES_COLUMN}' not found. "
-                    f"Available columns: {available}. Skipping state."
+                    f"[{state}] '{ACTIVITIES_COLUMN}' column not found. "
+                    f"Columns: {list(rows[0].keys())}. Skipping state."
                 )
-                # Clear in_progress so we don't resume into a broken state
                 cp["in_progress"] = None
                 if not dry_run:
                     _save_checkpoint(cp)
                 return rows_written
 
-        total_raw += len(rows)
+        total_raw    += len(rows)
+        page_records  = _filter_rows(state, rows, nic_set, nic_desc, cat_map)
 
-        # Filter and enrich this page's rows
-        page_records = _filter_rows(state, rows, nic_set, nic_desc, cat_map)
-
-        # ── Persist immediately (FIX 7) ───────────────────────────────────
+        # Atomic CSV append (ephemeral)
         if not dry_run and page_records:
             _append_to_csv(csv_path, page_records)
 
         rows_written += len(page_records)
         next_offset   = offset + BATCH_SIZE
 
-        # Update checkpoint after every page
+        # Checkpoint saved AFTER the CSV rename
         if not dry_run:
             cp["in_progress"] = {
-                "state":        state,
-                "next_offset":  next_offset,
-                "csv_path":     csv_path,
+                "state": state, "next_offset": next_offset,
+                "csv_path": csv_path, "xlsx_path": xlsx_path,
                 "rows_written": rows_written,
             }
             _save_checkpoint(cp)
@@ -672,41 +641,45 @@ def process_state(
             f"{total_raw:,} raw records fetched"
         )
 
-        # ── Deadline check (FIX 9) ────────────────────────────────────────
+        # Deadline check — after checkpoint so progress is always saved
         elapsed = time.monotonic() - _run_start
-        remaining = RUN_DEADLINE_SECONDS - elapsed
-        if remaining <= 0:
+        if elapsed >= RUN_DEADLINE_SECONDS:
             log.info(
                 f"[{state}] Deadline reached after {elapsed/3600:.2f}h — "
-                f"stopping at offset={next_offset} with checkpoint saved. "
-                f"Workflow will commit and retrigger."
+                f"stopping at offset={next_offset}. "
+                f"Partial CSV will be discarded; state will re-fetch next run."
             )
-            return rows_written
+            # Clean up partial CSV — don't leave half-built files around
+            for stale in [csv_path, csv_path + ".tmp"]:
+                if os.path.exists(stale):
+                    os.remove(stale)
+            raise DeadlineReached()
+
+        # Accept short page as last page after retries
+        if len(rows) < BATCH_SIZE:
+            break
+
+    # ── State complete — convert CSV → xlsx ───────────────────────────────
+    if not dry_run:
+        if os.path.exists(csv_path):
+            _convert_csv_to_xlsx(csv_path, xlsx_path)
+        else:
+            log.info(f"[{state}] No matching rows — no xlsx produced.")
 
     log.info(
-        f"[{state}] Complete — {rows_written:,} matching supplier rows "
+        f"[{state}] Complete — {rows_written:,} matching rows "
         f"(from {total_raw:,} total records)"
     )
     return rows_written
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v4.2")
-    parser.add_argument(
-        "--reset", action="store_true",
-        help="Ignore checkpoint and restart from first state",
-    )
-    parser.add_argument(
-        "--state", type=str, default=None,
-        help="Run a single state only, e.g. --state DELHI",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Fetch and filter but do not write any CSV files",
-    )
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v6")
+    parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
+    parser.add_argument("--state",   type=str, default=None, help="Run a single state")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
     args = parser.parse_args()
 
     if not API_KEY:
@@ -719,24 +692,27 @@ def main() -> None:
     if args.state:
         target = args.state.strip().upper()
         if target not in STATES_AND_UTS:
-            log.error(
-                f"Unknown state: {target!r}.\nValid values:\n  "
-                + "\n  ".join(STATES_AND_UTS)
-            )
+            log.error(f"Unknown state: {target!r}.")
             sys.exit(1)
-        cp        = {"completed": [], "failed": [], "in_progress": None}
-        pending   = [target]
+        cp      = {"completed": [], "failed": [], "in_progress": None, "runs_without_progress": 0}
+        pending = [target]
     else:
         if args.reset:
-            cp = {"completed": [], "failed": [], "in_progress": None}
+            cp = {"completed": [], "failed": [], "in_progress": None, "runs_without_progress": 0}
             log.info("Reset flag set — ignoring any existing checkpoint.")
         else:
             cp = _load_checkpoint()
 
-        completed = set(cp.get("completed", []))
+        runs_without_progress = cp.get("runs_without_progress", 0)
+        if runs_without_progress >= MAX_RUNS_WITHOUT_PROGRESS:
+            log.error(
+                f"No new states completed in the last {runs_without_progress} runs. "
+                f"Stopping retrigger chain to avoid infinite loop. "
+                f"Investigate failed states, then use --reset or delete the checkpoint to resume."
+            )
+            raise RunLimitReached()
 
-        # If a state was in_progress, put it first in pending so we resume it
-        # before moving on to states we haven't started yet.
+        completed = set(cp.get("completed", []))
         ip_state  = (cp.get("in_progress") or {}).get("state")
         remaining = [s for s in STATES_AND_UTS if s not in completed]
         if ip_state and ip_state in remaining:
@@ -747,16 +723,19 @@ def main() -> None:
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v4  {'[DRY RUN]' if args.dry_run else ''}")
-    print(f"  Resource ID      : {RESOURCE_ID}")
-    print(f"  NIC codes loaded : {len(nic_set)}")
-    print(f"  States pending   : {len(pending)}  (skipped: {skipped})")
-    print(f"  Batch size       : {BATCH_SIZE} records/page")
-    print(f"  Request gap      : {MIN_REQUEST_GAP}s → ~{int(3600/MIN_REQUEST_GAP)} req/hr (limit 1,000)")
-    print(f"  Output folder    : {OUTPUT_DIR}/suppliers_<State>.csv")
+    print(f"  MSME Supplier Fetcher  v6  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  Resource ID           : {RESOURCE_ID}")
+    print(f"  NIC codes loaded      : {len(nic_set)}")
+    print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
+    print(f"  Batch size            : {BATCH_SIZE} records/page")
+    print(f"  Request gap           : {MIN_REQUEST_GAP}s → ~{int(3600/MIN_REQUEST_GAP)} req/hr (limit 1,000)")
+    print(f"  Deadline              : {RUN_DEADLINE_SECONDS/3600:.2f}h")
+    print(f"  Stall limit           : {MAX_RUNS_WITHOUT_PROGRESS} runs without progress")
+    print(f"  Output folder         : {OUTPUT_DIR}/suppliers_<State>.xlsx")
     print(f"{'═'*64}\n")
 
-    total_suppliers = 0
+    total_suppliers    = 0
+    completed_this_run = 0
 
     for i, state in enumerate(pending, 1):
         log.info(f"[{i:02d}/{len(pending)}] ── {state.title()} ──")
@@ -764,18 +743,26 @@ def main() -> None:
             rows_written = process_state(
                 state, nic_set, nic_desc, cat_map, cp, dry_run=args.dry_run
             )
-            total_suppliers += rows_written
+            total_suppliers    += rows_written
+            completed_this_run += 1
 
-            # Mark fully completed
             completed_list = cp.get("completed", [])
             if state not in completed_list:
                 completed_list.append(state)
-            cp["completed"]  = sorted(completed_list)
-            cp["failed"]     = [s for s in cp.get("failed", []) if s != state]
-            cp["in_progress"] = None
+            cp["completed"]             = sorted(completed_list)
+            cp["failed"]                = [s for s in cp.get("failed", []) if s != state]
+            cp["in_progress"]           = None
+            cp["runs_without_progress"] = 0
 
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
+
+        except DeadlineReached:
+            log.info("Deadline caught in main loop — stopping immediately.")
+            if completed_this_run == 0 and not args.state and not args.dry_run:
+                cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
+                _save_checkpoint(cp)
+            break
 
         except Exception as exc:
             log.error(f"[{state}] FAILED: {exc}")
@@ -783,10 +770,14 @@ def main() -> None:
             if state not in failed:
                 failed.append(state)
             cp["failed"] = failed
-            # Leave in_progress intact so partial CSV + offset are preserved;
-            # the next run will retry from where this page left off.
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
+
+    # Increment stall counter if nothing completed (non-deadline exit)
+    if completed_this_run == 0 and not args.state and not args.dry_run:
+        if not any(isinstance(sys.exc_info()[1], DeadlineReached) for _ in [None]):
+            cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
+            _save_checkpoint(cp)
 
     completed_set = set(cp.get("completed", []))
     still_pending = [s for s in STATES_AND_UTS if s not in completed_set]
@@ -794,13 +785,14 @@ def main() -> None:
 
     print(f"\n{'═'*64}")
     print(f"  Total supplier rows saved : {total_suppliers:,}")
+    print(f"  States completed this run : {completed_this_run}")
     print(f"  Output folder             : {OUTPUT_DIR}/")
     if failed:
         print(f"\n  States FAILED (will retry on next run):")
         for s in failed:
             print(f"    ✗  {s.title()}")
     if still_pending:
-        print(f"\n  States still pending (not reached in this run):")
+        print(f"\n  States still pending:")
         for s in still_pending:
             marker = "↺" if s == (cp.get("in_progress") or {}).get("state") else "○"
             print(f"    {marker}  {s.title()}")
@@ -813,12 +805,15 @@ def main() -> None:
     else:
         if not args.state and not args.dry_run and os.path.exists(CHECKPOINT):
             os.remove(CHECKPOINT)
-            log.info("Checkpoint cleared — clean full run complete.")
+            log.info("Checkpoint cleared — full run complete.")
         sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RunLimitReached:
+        sys.exit(3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -839,4 +834,3 @@ if __name__ == "__main__":
 # ... (26 smaller states)      1,697,500   1,698   ~2.12 hrs
 # ──────────────────────── ────────────── ──────   ──────
 # TOTAL                        7,247,500   7,249   ~9.1 hrs
-# ─────────────────────────────────────────────────────────────────────────────
