@@ -6,11 +6,14 @@
     "ASSAM",
     "BIHAR",
     "CHANDIGARH"
+    "CHHATTISGARH"
+    "DELHI"
+    "HARYANA"
   ],
   "failed": [],
   "in_progress": {
-    "state": "CHHATTISGARH",
-    "next_offset": 209000,
+    "state": "GUJARAT",
+    "next_offset": 0,
     "csv_path": "data/suppliers/suppliers_Chhattisgarh.csv",
     "xlsx_path": "data/suppliers/suppliers_Chhattisgarh.xlsx",
     "rows_written": 23424
