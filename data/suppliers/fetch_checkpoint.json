@@ -10,16 +10,17 @@
     "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
     "DELHI",
     "GOA",
-    "HARYANA"
+    "HARYANA",
+    "HIMACHAL PRADESH"
   ],
   "failed": [
     "GUJARAT"
   ],
   "in_progress": {
-    "state": "HIMACHAL PRADESH",
-    "next_offset": 237000,
-    "xlsx_path": "data/suppliers/suppliers_Himachal_Pradesh.xlsx",
-    "rows_written": 36348
+    "state": "JAMMU AND KASHMIR",
+    "next_offset": 565000,
+    "xlsx_path": "data/suppliers/suppliers_Jammu_And_Kashmir.xlsx",
+    "rows_written": 80767
   },
   "runs_without_progress": 0
 }
