@@ -38,6 +38,8 @@ jobs:
 
       - name: Verify git push access
         run: |
+          git checkout -- .
+          git clean -fd
           git pull --rebase origin main
           mkdir -p data/suppliers
           echo "test" > data/suppliers/.push_test
@@ -75,6 +77,8 @@ jobs:
       - name: Commit and push supplier data
         id: commit_data
         run: |
+          git checkout -- .
+          git clean -fd
           git pull --rebase origin main
           git add data/suppliers/fetch_checkpoint.json 2>/dev/null || true
           git add data/suppliers/suppliers_*.xlsx       2>/dev/null || true
@@ -95,6 +99,8 @@ jobs:
             WAIT=$(( attempt * attempt * 10 ))
             echo "Push failed (attempt ${attempt}/3) — retrying in ${WAIT}s..."
             sleep "$WAIT"
+            git checkout -- .
+            git clean -fd
             git pull --rebase origin main
           done
 
@@ -108,8 +114,11 @@ jobs:
           count=$(find data/suppliers -name "suppliers_*.xlsx" | wc -l)
           echo "xlsx files present: ${count}"
           [ "$count" -gt 0 ] || { echo "::error::No xlsx files found!"; exit 1; }
+
   retrigger-if-incomplete:
     needs: fetch-suppliers
+    # run_incomplete == 'stop' (exit 3) intentionally does NOT match 'true'
+    # so the retrigger chain stops when MAX_RUNS_WITHOUT_PROGRESS is hit
     if: |
       always() &&
       needs.fetch-suppliers.result != 'cancelled' &&
