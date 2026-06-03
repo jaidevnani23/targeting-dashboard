@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v8
+MSME Supplier Fetcher  —  Production v7
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -16,57 +16,74 @@ Exit codes (read by GitHub Actions):
     2  — states still pending (deadline/partial); workflow auto-retriggers
     3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v7  (v8)
+CHANGES vs v6  (v7)
 ---------------------
-FIX 16 — Partial state data saved on deadline instead of discarded.
+FIX 19-CALL — _dedup_all_existing() is now actually called in main().
 
-    Problem: When the deadline hit mid-state, the partial CSV was deleted
-    and the state restarted from offset 0 next run. For large states like
-    Maharashtra (~7,000,000 records, ~8.75 hours to fetch), this meant
-    perpetually re-fetching the same data across every run with zero
-    progress.
+    Problem: the function was defined and fully documented in v6 but was
+    never invoked anywhere in main(), so deduplication never ran.
 
-    Solution:
-    (a) On deadline, convert the partial CSV to xlsx and commit it
-        immediately (same as a completed state), then raise DeadlineReached.
-    (b) On resume, detect an existing partial xlsx for the in-progress
-        state and read its row count so pagination continues from the
-        correct offset rather than restarting from 0.
-    (c) _convert_csv_to_xlsx() now merges new rows into an existing xlsx
-        if one is present (run 2 appends to run 1's partial xlsx, etc.).
-    (d) The runs_without_progress stall counter is reset to 0 when a
-        partial xlsx was saved on deadline, so the retrigger chain does
-        not stop prematurely for large states that span multiple runs.
+    Solution: _dedup_all_existing(cp, dry_run=args.dry_run) is called in
+    main() after the checkpoint is loaded and before the state loop begins,
+    matching the documented intent.
 
-FIX 17 — Multi-sheet xlsx support for states exceeding Excel's row limit.
+FIX 20 — Short-page retry now re-fetches the same offset.
 
-    Problem: Excel has a hard limit of 1,048,576 rows per sheet. A state
-    with millions of filtered rows would silently truncate on write.
+    Problem: when a short page triggered a retry, the loop decremented
+    page_num but the for-loop variable `offset` still advanced to
+    offset + BATCH_SIZE on the next iteration, so retries were fetching
+    the wrong page entirely.
 
-    Solution: _write_xlsx_multisheet() splits rows across Data_1, Data_2,
-    ... sheets as needed. Each sheet gets the full header row. The merge
-    logic in _convert_csv_to_xlsx() reads all sheets when loading an
-    existing xlsx so no previously saved rows are lost.
+    Solution: the pagination loop is restructured so that `offset` is
+    managed manually (not by range()). On a short-page retry the offset
+    is not incremented, so the next iteration re-fetches the same offset.
 
-Earlier fixes (retained from v7):
+FIX 21 — Workflow comment corrected to match FIX 16 behavior.
+
+    Problem: the workflow YAML comment in the "Run MSME supplier fetcher"
+    step still said "Partial CSVs from deadline interrupts are discarded —
+    the state re-fetches from offset 0 next run", which is the pre-FIX-16
+    behavior. The script has saved partial xlsx files on deadline and
+    resumed from the saved offset since v6.
+
+    Solution: the comment is updated in the workflow YAML (see
+    update_suppliers.yml). No script logic changes needed.
+
+FIX 22 — git clean now uses --exclude in all steps that precede pull --rebase.
+
+    Problem: FIX 18 claimed to add --exclude globs to git clean calls in
+    the workflow, but the actual YAML contained bare `git clean -fd` in
+    both the "Verify git push access" and "Commit and push supplier data"
+    steps, which would delete committed-but-not-yet-pushed xlsx files and
+    the checkpoint, breaking the retrigger chain.
+
+    Solution: all `git clean -fd` calls in the workflow that precede a
+    `git pull --rebase` now use:
+        git clean -fd \
+          --exclude=data/suppliers/suppliers_*.xlsx \
+          --exclude=data/suppliers/fetch_checkpoint.json
+    See update_suppliers.yml for the full change. No script logic changes.
+
+Earlier fixes (retained):
     FIX 1  — urllib3 Retry excludes 429 from status_forcelist.
     FIX 4  — 429 backoff: 120 + 60*attempt seconds.
     FIX 5  — NIC codes parsed from Activities JSON column.
     FIX 6  — Batch size 1000, gap 4.5s.
     FIX 7  — Per-page checkpointing + incremental CSV writes.
-    FIX 8  — Verify CSV exists before trusting saved offset.
+    FIX 8  — Verify CSV/xlsx exists before trusting saved offset.
     FIX 9  — Python-side deadline + DeadlineReached exception.
     FIX 10 — Duplicate-row guard on CSV resume (atomic write).
     FIX 11 — Validate page size before treating short pages as end-of-data.
-    FIX 12 — Retry git push with exponential backoff (workflow).
+    FIX 12 — Retry git push with exponential backoff (workflow level).
     FIX 13 — Run-limit safety valve to stop infinite retrigger loops.
     FIX 14 — Output format changed from CSV to XLSX.
-    FIX 15 — Per-state git commit after each state xlsx is produced.
-             git config must be set before this script runs (see workflow).
-    FIX 16 — Partial state data saved on deadline instead of discarded.
-             Stall counter resets when partial xlsx saved (not just on
-             full state completion).
-    FIX 17 — Multi-sheet xlsx support for states exceeding Excel row limit.
+    FIX 15 — Per-state git commit + push from inside the script.
+    FIX 16 — Save partial xlsx on deadline so the next run can resume.
+    FIX 17 — Fixed double stall-counter increment on deadline with no progress.
+    FIX 18 — Workflow git clean no longer deletes untracked output files.
+             (Completed properly in v7 — see FIX 22 above.)
+    FIX 19 — Deduplicate all existing xlsx files before fetching begins.
+             (Call added in v7 — see FIX 19-CALL above.)
 
 Requirements:
     pip install requests pandas openpyxl
@@ -127,14 +144,11 @@ BATCH_SIZE         = 1000
 TIMEOUT_PAGE       = 60
 MAX_RETRIES        = 4
 RETRY_BASE         = 5
-SHORT_PAGE_RETRIES = 3
+SHORT_PAGE_RETRIES = 3    # FIX 11: retry short pages before accepting as last
 MIN_REQUEST_GAP: float = 4.5
 _last_request_at: float = 0.0
 
 ACTIVITIES_COLUMN = "Activities"
-
-# Excel hard limit per sheet (leave 1 row for header)
-EXCEL_MAX_ROWS = 1_048_575
 
 # ── Sentinel exceptions ───────────────────────────────────────────────────────
 class DeadlineReached(Exception):
@@ -143,14 +157,14 @@ class DeadlineReached(Exception):
 class RunLimitReached(Exception):
     """Too many consecutive runs with no progress — exit with code 3."""
 
-# ── Run deadline ──────────────────────────────────────────────────────────────
+# ── Run deadline (FIX 9) ─────────────────────────────────────────────────────
 RUN_DEADLINE_SECONDS: int = int(os.environ.get("RUN_DEADLINE_SECONDS", 20_700))
 _run_start: float = time.monotonic()
 
-# ── Stall limit ───────────────────────────────────────────────────────────────
+# ── Stall limit (FIX 13) ─────────────────────────────────────────────────────
 MAX_RUNS_WITHOUT_PROGRESS: int = int(os.environ.get("MAX_RUNS_WITHOUT_PROGRESS", 10))
 
-# ── Output columns ────────────────────────────────────────────────────────────
+# ── Output columns ───────────────────────────────────────────────────────────
 OUTPUT_COLUMNS = [
     "State", "District", "Pincode", "Enterprise_Name",
     "Registration_Date", "Address", "NIC_Code", "NIC_Description", "Category",
@@ -218,12 +232,14 @@ def _throttle() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 #  FETCH ONE CSV PAGE
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_page_csv(state: str, offset: int) -> tuple[list[dict], bool]:
+def fetch_page_csv(state: str, offset: int) -> list[dict]:
     """
     Fetch one batch of records as CSV.
-    Returns (rows, is_last_page).
-    A short page (< BATCH_SIZE) is retried SHORT_PAGE_RETRIES times
-    before being accepted as the genuine last page.
+
+    Returns the list of row dicts (may be empty, which signals end-of-data).
+    Short-page detection and retry logic lives in the caller (process_state)
+    so that offset management stays in one place (FIX 20).
+
     Raises RuntimeError after MAX_RETRIES failures.
     """
     params = {
@@ -252,18 +268,15 @@ def fetch_page_csv(state: str, offset: int) -> tuple[list[dict], bool]:
             text = resp.text.strip()
 
             if not text:
-                return [], True
+                return []
 
             reader = csv.DictReader(io.StringIO(text))
             rows   = list(reader)
 
-            if not rows:
-                return [], True
-
-            if offset == 0:
+            if offset == 0 and rows:
                 log.info(f"[{state}] CSV columns: {list(rows[0].keys())}")
 
-            return rows, False
+            return rows
 
         except (
             requests.exceptions.Timeout,
@@ -385,10 +398,9 @@ def _filter_rows(
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ATOMIC CSV APPEND  (ephemeral — local disk only, never committed)
+#  ATOMIC CSV APPEND  (FIX 10)
 # ─────────────────────────────────────────────────────────────────────────────
 def _count_csv_rows(path: str) -> int:
-    """Return the number of data rows in a CSV (excludes header). 0 if absent."""
     if not os.path.exists(path):
         return 0
     try:
@@ -399,10 +411,6 @@ def _count_csv_rows(path: str) -> int:
 
 
 def _append_to_csv(path: str, records: list[dict]) -> None:
-    """
-    Atomically append records to the ephemeral state CSV.
-    Writes to a staging file, fsyncs, then renames over the real path.
-    """
     if not records:
         return
 
@@ -428,131 +436,225 @@ def _append_to_csv(path: str, records: list[dict]) -> None:
 
     os.replace(tmp_path, path)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  MULTI-SHEET XLSX WRITER  (FIX 17)
-# ─────────────────────────────────────────────────────────────────────────────
-def _write_xlsx_multisheet(df: pd.DataFrame, xlsx_path: str) -> None:
-    """Write df to xlsx, splitting into multiple sheets if rows exceed Excel limit."""
-    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-        if len(df) <= EXCEL_MAX_ROWS:
-            df.to_excel(writer, index=False, sheet_name="Data_1")
-        else:
-            num_sheets = (len(df) + EXCEL_MAX_ROWS - 1) // EXCEL_MAX_ROWS
-            log.info(
-                f"Row count {len(df):,} exceeds Excel limit — "
-                f"splitting across {num_sheets} sheets."
-            )
-            for i in range(num_sheets):
-                chunk      = df.iloc[i * EXCEL_MAX_ROWS : (i + 1) * EXCEL_MAX_ROWS]
-                sheet_name = f"Data_{i + 1}"
-                chunk.to_excel(writer, index=False, sheet_name=sheet_name)
-                log.info(f"  Sheet {sheet_name}: {len(chunk):,} rows")
-
-    size_mb = os.path.getsize(xlsx_path) / 1024 / 1024
-    log.info(f"xlsx written: {xlsx_path} ({size_mb:.2f} MB, {len(df):,} rows total)")
-
-
-def _read_xlsx_all_sheets(xlsx_path: str) -> pd.DataFrame:
-    """Read all sheets from an xlsx and return a single concatenated DataFrame."""
-    all_sheets = pd.read_excel(xlsx_path, sheet_name=None, dtype=str, engine="openpyxl")
-    frames = []
-    for _, df in all_sheets.items():
-        for col in OUTPUT_COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
-        frames.append(df[OUTPUT_COLUMNS])
-    if not frames:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
-    return pd.concat(frames, ignore_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CSV → XLSX CONVERSION  (FIX 16 + FIX 17)
+#  XLSX HELPERS  (FIX 14)
 # ─────────────────────────────────────────────────────────────────────────────
-def _convert_csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
-    """
-    Convert the completed/partial ephemeral CSV to xlsx.
-    Merges with an existing xlsx if one is present (partial run continuation).
-    Splits across multiple sheets if total rows exceed Excel's limit.
-    Deletes the CSV on success.
-    """
-    log.info(f"Converting {csv_path} → {xlsx_path} ...")
-    df_new = pd.read_csv(csv_path, encoding="utf-8-sig", dtype=str)
+def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
+    df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig")
     for col in OUTPUT_COLUMNS:
-        if col not in df_new.columns:
-            df_new[col] = ""
-    df_new = df_new[OUTPUT_COLUMNS]
+        if col not in df.columns:
+            df[col] = ""
+    df = df[OUTPUT_COLUMNS]
 
-    if os.path.exists(xlsx_path):
-        log.info(
-            f"Existing xlsx found — merging {len(df_new):,} new rows "
-            f"into existing data."
-        )
-        try:
-            df_existing = _read_xlsx_all_sheets(xlsx_path)
-            df = pd.concat([df_existing, df_new], ignore_index=True)
-            log.info(
-                f"Merged: {len(df_existing):,} existing + "
-                f"{len(df_new):,} new = {len(df):,} total rows."
-            )
-        except Exception as exc:
-            log.warning(
-                f"Could not read existing xlsx ({exc}) — "
-                f"writing new rows only (existing data may be lost)."
-            )
-            df = df_new
-    else:
-        df = df_new
+    tmp_path = xlsx_path + ".tmp"
+    df.to_excel(tmp_path, index=False, engine="openpyxl")
+    os.replace(tmp_path, xlsx_path)
 
-    _write_xlsx_multisheet(df, xlsx_path)
-    os.remove(csv_path)
-    log.info(f"Ephemeral CSV deleted: {csv_path}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PER-STATE GIT COMMIT  (FIX 15)
-# ─────────────────────────────────────────────────────────────────────────────
-def _git_commit_xlsx(xlsx_path: str, state: str) -> None:
-    """Commit and push a single completed/partial state xlsx file."""
     try:
-        subprocess.run(["git", "add", xlsx_path], check=True)
+        os.remove(csv_path)
+    except OSError:
+        pass
+    log.info(f"Written {len(df):,} rows → {os.path.basename(xlsx_path)}")
 
-        diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
-        if diff.returncode == 0:
-            log.info(f"[{state}] xlsx already committed — nothing to push.")
-            return
 
-        subprocess.run(
-            ["git", "commit", "-m", f"chore(data): suppliers {state.title()} [auto]"],
-            check=True,
-        )
-        log.info(f"[{state}] xlsx committed locally.")
+def _count_xlsx_rows(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    try:
+        df = pd.read_excel(path, dtype=str, engine="openpyxl")
+        return len(df)
+    except Exception:
+        return 0
 
-    except subprocess.CalledProcessError as e:
-        log.error(
-            f"[{state}] git add/commit failed: {e} — "
-            f"xlsx will be picked up by final commit step."
-        )
+
+def _read_xlsx_rows(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    try:
+        df = pd.read_excel(path, dtype=str, engine="openpyxl").fillna("")
+        return df.to_dict(orient="records")
+    except Exception as exc:
+        log.warning(f"Could not read {path} ({exc}) — treating as empty.")
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DEDUPLICATION  (FIX 19)
+# ─────────────────────────────────────────────────────────────────────────────
+def _dedup_xlsx(xlsx_path: str) -> int:
+    try:
+        df = pd.read_excel(xlsx_path, dtype=str, engine="openpyxl").fillna("")
+    except Exception as exc:
+        log.warning(f"Dedup: could not read {os.path.basename(xlsx_path)} ({exc}) — skipping.")
+        return 0
+
+    before   = len(df)
+    df_clean = df.drop_duplicates(subset=OUTPUT_COLUMNS, keep="first")
+    removed  = before - len(df_clean)
+
+    if removed == 0:
+        return 0
+
+    for col in OUTPUT_COLUMNS:
+        if col not in df_clean.columns:
+            df_clean[col] = ""
+    df_clean = df_clean[OUTPUT_COLUMNS]
+
+    tmp_path = xlsx_path + ".tmp"
+    try:
+        df_clean.to_excel(tmp_path, index=False, engine="openpyxl")
+        os.replace(tmp_path, xlsx_path)
+    except Exception as exc:
+        log.warning(f"Dedup: could not write {os.path.basename(xlsx_path)} ({exc}) — original unchanged.")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return 0
+
+    log.info(
+        f"Dedup: {os.path.basename(xlsx_path)} — removed {removed:,} duplicate rows "
+        f"({before:,} → {len(df_clean):,})"
+    )
+    return removed
+
+
+def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
+    """
+    Scan every suppliers_*.xlsx in OUTPUT_DIR, deduplicate each one, and
+    commit any files that changed.
+
+    For partial files (state listed in cp['in_progress']), rows_written
+    in the checkpoint is updated to the post-dedup row count so the
+    resume logic in process_state() does not reset to offset 0.
+    """
+    if not os.path.isdir(OUTPUT_DIR):
         return
 
-    for attempt in range(1, 4):
-        try:
-            subprocess.run(["git", "checkout", "--", "."], check=False)
-            subprocess.run(["git", "clean", "-fd"], check=False)
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=True)
-            subprocess.run(["git", "push"], check=True)
-            log.info(f"[{state}] xlsx pushed successfully (attempt {attempt}).")
-            return
-        except subprocess.CalledProcessError as e:
-            wait = attempt * attempt * 10
-            log.warning(
-                f"[{state}] Push failed (attempt {attempt}/3): {e} — "
-                f"retrying in {wait}s."
-            )
-            time.sleep(wait)
-
-    log.error(
-        f"[{state}] Failed to push xlsx after 3 attempts. "
-        f"xlsx remains on disk and will be picked up by the workflow's final commit step."
+    pattern    = "suppliers_"
+    xlsx_files = sorted(
+        p for p in os.listdir(OUTPUT_DIR)
+        if p.startswith(pattern) and p.endswith(".xlsx")
     )
+
+    if not xlsx_files:
+        return
+
+    log.info(f"Dedup: scanning {len(xlsx_files)} existing xlsx file(s) …")
+
+    ip               = cp.get("in_progress") or {}
+    ip_state         = ip.get("state", "")
+    ip_xlsx_basename = (
+        os.path.basename(ip.get("xlsx_path", "")) if ip_state else ""
+    )
+
+    any_changed      = False
+    checkpoint_dirty = False
+
+    for fname in xlsx_files:
+        xlsx_path = os.path.join(OUTPUT_DIR, fname)
+
+        if dry_run:
+            try:
+                df    = pd.read_excel(xlsx_path, dtype=str, engine="openpyxl").fillna("")
+                dupes = len(df) - len(df.drop_duplicates(subset=OUTPUT_COLUMNS))
+                if dupes:
+                    log.info(f"Dedup [dry-run]: {fname} — would remove {dupes:,} duplicate rows")
+            except Exception as exc:
+                log.warning(f"Dedup [dry-run]: could not read {fname} ({exc})")
+            continue
+
+        removed = _dedup_xlsx(xlsx_path)
+
+        if removed == 0:
+            continue
+
+        any_changed = True
+
+        if fname == ip_xlsx_basename and ip_state:
+            new_count = _count_xlsx_rows(xlsx_path)
+            log.info(
+                f"Dedup: updating checkpoint rows_written for {ip_state}: "
+                f"{ip.get('rows_written', '?')} → {new_count:,}"
+            )
+            cp["in_progress"]["rows_written"] = new_count
+            checkpoint_dirty = True
+
+    if not dry_run and any_changed:
+        if checkpoint_dirty:
+            _save_checkpoint(cp)
+
+        changed_paths = [
+            os.path.join(OUTPUT_DIR, f) for f in xlsx_files
+            if os.path.exists(os.path.join(OUTPUT_DIR, f))
+        ]
+        try:
+            subprocess.run(["git", "add"] + changed_paths + [CHECKPOINT], check=True)
+            result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"], capture_output=True
+            )
+            if result.returncode != 0:
+                subprocess.run(
+                    ["git", "commit", "-m", "chore(data): dedup existing supplier xlsx files"],
+                    check=True,
+                )
+                for attempt in (1, 2):
+                    push = subprocess.run(["git", "push"], capture_output=True, text=True)
+                    if push.returncode == 0:
+                        log.info("Dedup: committed and pushed cleaned xlsx files.")
+                        break
+                    log.warning(
+                        f"Dedup: git push failed (attempt {attempt}/2): "
+                        f"{push.stderr.strip()}"
+                        + (" — retrying after pull." if attempt == 1 else " — giving up; workflow commit will retry.")
+                    )
+                    if attempt == 1:
+                        subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+        except subprocess.CalledProcessError as exc:
+            log.warning(f"Dedup: git operation failed ({exc}) — workflow commit step will pick this up.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GIT COMMIT HELPER  (FIX 15)
+# ─────────────────────────────────────────────────────────────────────────────
+def _git_commit_xlsx(xlsx_path: str, state: str, partial: bool = False) -> None:
+    label = "partial" if partial else "complete"
+    msg   = f"chore(data): suppliers {state.title()} [{label}]"
+    cp_path = CHECKPOINT
+
+    try:
+        subprocess.run(["git", "add", xlsx_path, cp_path], check=True)
+
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            log.info(f"[{state}] git: nothing new to commit (xlsx already up to date).")
+            return
+
+        subprocess.run(["git", "commit", "-m", msg], check=True)
+
+        for attempt in (1, 2):
+            push = subprocess.run(["git", "push"], capture_output=True, text=True)
+            if push.returncode == 0:
+                log.info(f"[{state}] git push succeeded ({label}).")
+                return
+            log.warning(
+                f"[{state}] git push failed (attempt {attempt}/2): "
+                f"{push.stderr.strip()} — "
+                + ("will retry after pull." if attempt == 1 else "giving up; workflow commit will retry.")
+            )
+            if attempt == 1:
+                subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+
+    except subprocess.CalledProcessError as exc:
+        log.warning(
+            f"[{state}] git operation failed ({exc}) — "
+            "workflow commit step will pick this up."
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CHECKPOINT HELPERS
@@ -602,7 +704,7 @@ def _safe_filename(s: str) -> str:
     )
 
 def _csv_path_for(state: str) -> str:
-    return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.csv")
+    return os.path.join(OUTPUT_DIR, f"_partial_{_safe_filename(state)}.csv")
 
 def _xlsx_path_for(state: str) -> str:
     return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.xlsx")
@@ -617,64 +719,45 @@ def process_state(
     dry_run: bool = False,
 ) -> int:
     """
-    Fetch all pages for a state.
-
-    - Appends matching rows to an ephemeral CSV after every page.
-    - Saves checkpoint after every page.
-    - On completion OR deadline: converts the CSV to xlsx (merging with any
-      existing partial xlsx), commits and pushes immediately.
-    - On resume: detects existing partial xlsx and counts its rows so
-      pagination resumes correctly without re-fetching.
-
+    Fetch all pages for a state, writing rows and the checkpoint after every
+    page. Raises DeadlineReached when the run time limit is hit (after saving
+    a partial xlsx and committing it — FIX 16).
     Returns the number of matching rows written this session.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     csv_path  = _csv_path_for(state)
     xlsx_path = _xlsx_path_for(state)
 
-    # ── Determine resume offset ───────────────────────────────────────────
+    # ── Determine resume offset (FIX 8 + FIX 10 + FIX 16) ───────────────
     ip = cp.get("in_progress") or {}
     if ip.get("state") == state and ip.get("next_offset") is not None:
         saved_offset       = ip["next_offset"]
         saved_rows_written = ip.get("rows_written", 0)
-        csv_row_count      = _count_csv_rows(csv_path)
 
-        if csv_row_count == 0:
-            # CSV is gone — check if a partial xlsx was saved from a prior
-            # deadline hit (FIX 16: resume from partial xlsx)
-            if os.path.exists(xlsx_path):
-                try:
-                    df_existing    = _read_xlsx_all_sheets(xlsx_path)
-                    xlsx_row_count = len(df_existing)
-                    log.info(
-                        f"[{state}] No CSV but partial xlsx exists with "
-                        f"{xlsx_row_count:,} rows — resuming from "
-                        f"offset={saved_offset}."
-                    )
-                    start_offset = saved_offset
-                    rows_written = xlsx_row_count
-                except Exception as exc:
-                    log.warning(
-                        f"[{state}] Could not read existing xlsx ({exc}) — "
-                        f"restarting from 0."
-                    )
-                    start_offset = 0
-                    rows_written = 0
-            else:
-                log.warning(
-                    f"[{state}] Checkpoint claims offset={saved_offset} but "
-                    f"CSV is empty/absent and no xlsx found — restarting from 0."
-                )
-                start_offset = 0
-                rows_written = 0
+        if os.path.exists(csv_path):
+            on_disk_rows = _count_csv_rows(csv_path)
+            source_label = "ephemeral CSV"
+        else:
+            on_disk_rows = _count_xlsx_rows(xlsx_path)
+            source_label = "partial xlsx (from repo)"
 
-        elif csv_row_count != saved_rows_written:
+        if on_disk_rows == 0:
             log.warning(
-                f"[{state}] CSV has {csv_row_count:,} rows but checkpoint "
-                f"says {saved_rows_written:,} — restarting from 0 to be safe."
+                f"[{state}] Checkpoint claims offset={saved_offset} but no "
+                f"CSV or xlsx found on disk — restarting from 0."
             )
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
+            start_offset = 0
+            rows_written = 0
+            if os.path.exists(xlsx_path):
+                os.remove(xlsx_path)
+        elif on_disk_rows != saved_rows_written:
+            log.warning(
+                f"[{state}] {source_label} has {on_disk_rows:,} rows but "
+                f"checkpoint says {saved_rows_written:,} — restarting from 0."
+            )
+            for p in (csv_path, xlsx_path):
+                if os.path.exists(p):
+                    os.remove(p)
             start_offset = 0
             rows_written = 0
         else:
@@ -682,21 +765,35 @@ def process_state(
             rows_written = saved_rows_written
             log.info(
                 f"[{state}] Resuming from offset={start_offset} "
-                f"({rows_written:,} rows confirmed in CSV)"
+                f"({rows_written:,} rows confirmed in {source_label})"
             )
+            if not os.path.exists(csv_path) and os.path.exists(xlsx_path):
+                log.info(
+                    f"[{state}] Materialising ephemeral CSV from partial xlsx "
+                    f"so pagination can resume."
+                )
+                existing_rows = _read_xlsx_rows(xlsx_path)
+                if existing_rows and not dry_run:
+                    tmp_csv = csv_path + ".tmp"
+                    with open(tmp_csv, "w", newline="", encoding="utf-8-sig") as f:
+                        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
+                        writer.writeheader()
+                        writer.writerows(existing_rows)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_csv, csv_path)
     else:
         start_offset = 0
         rows_written = 0
-        for stale in [csv_path, csv_path + ".tmp"]:
-            if os.path.exists(stale):
-                os.remove(stale)
-                log.info(f"[{state}] Removed stale file: {stale}")
+        for p in (csv_path, xlsx_path):
+            if os.path.exists(p):
+                os.remove(p)
+                log.info(f"[{state}] Removed stale file from previous attempt: {os.path.basename(p)}")
 
     if not dry_run:
         cp["in_progress"] = {
             "state": state, "next_offset": start_offset,
-            "csv_path": csv_path, "xlsx_path": xlsx_path,
-            "rows_written": rows_written,
+            "xlsx_path": xlsx_path, "rows_written": rows_written,
         }
         _save_checkpoint(cp)
 
@@ -705,11 +802,14 @@ def process_state(
     total_raw         = 0
     page_num          = 0
     first_page        = True
-    short_page_streak = 0
+    short_page_streak = 0   # FIX 11
+    # FIX 20: manage offset manually so short-page retries re-fetch the
+    # same offset instead of silently advancing to offset + BATCH_SIZE.
+    offset = start_offset
 
-    for offset in range(start_offset, 10**9, BATCH_SIZE):
+    while True:
         page_num += 1
-        rows, _ = fetch_page_csv(state, offset)
+        rows = fetch_page_csv(state, offset)
 
         # ── End-of-data detection ─────────────────────────────────────────
         if len(rows) == 0:
@@ -719,6 +819,10 @@ def process_state(
             )
             break
 
+        # ── Short-page handling (FIX 11 + FIX 20) ────────────────────────
+        # On a short page we retry WITHOUT advancing offset so the same
+        # page is re-fetched. Only advance offset once the page is either
+        # full-size or confirmed as the last page after all retries.
         if len(rows) < BATCH_SIZE:
             short_page_streak += 1
             if short_page_streak <= SHORT_PAGE_RETRIES:
@@ -727,8 +831,8 @@ def process_state(
                     f"— may be truncated, retrying ({short_page_streak}/{SHORT_PAGE_RETRIES})."
                 )
                 time.sleep(RETRY_BASE * short_page_streak)
-                page_num -= 1
-                continue
+                page_num -= 1   # don't count the retry as a new page
+                continue        # re-fetch the same offset (FIX 20)
             else:
                 log.info(
                     f"[{state}] Short page confirmed as last page after "
@@ -737,7 +841,7 @@ def process_state(
         else:
             short_page_streak = 0
 
-        # Validate Activities column (once, on first page)
+        # Validate Activities column (once, on first accepted page)
         if first_page:
             first_page = False
             if ACTIVITIES_COLUMN not in rows[0]:
@@ -762,8 +866,7 @@ def process_state(
         if not dry_run:
             cp["in_progress"] = {
                 "state": state, "next_offset": next_offset,
-                "csv_path": csv_path, "xlsx_path": xlsx_path,
-                "rows_written": rows_written,
+                "xlsx_path": xlsx_path, "rows_written": rows_written,
             }
             _save_checkpoint(cp)
 
@@ -774,41 +877,55 @@ def process_state(
             f"{total_raw:,} raw records fetched"
         )
 
-        # ── Deadline check ────────────────────────────────────────────────
+        # Deadline check (FIX 9) — after checkpoint so progress is always saved
         elapsed = time.monotonic() - _run_start
         if elapsed >= RUN_DEADLINE_SECONDS:
             log.info(
                 f"[{state}] Deadline reached after {elapsed/3600:.2f}h — "
                 f"stopping at offset={next_offset}. "
-                f"Saving partial xlsx and committing before exit (FIX 16)."
+                f"Saving partial xlsx and committing before exit."
             )
+            # FIX 16: convert partial CSV → partial xlsx and push so the
+            # next run (on a fresh runner) can resume from saved_offset.
             if not dry_run and os.path.exists(csv_path):
-                _convert_csv_to_xlsx(csv_path, xlsx_path)
-                _git_commit_xlsx(xlsx_path, state)
+                try:
+                    _csv_to_xlsx(csv_path, xlsx_path)
+                    _git_commit_xlsx(xlsx_path, state, partial=True)
+                except Exception as exc:
+                    log.warning(
+                        f"[{state}] Could not save partial xlsx on deadline ({exc}). "
+                        "Next run will restart this state from offset 0."
+                    )
             raise DeadlineReached()
 
+        # Accept short page as last page (after retries exhausted above)
         if len(rows) < BATCH_SIZE:
             break
 
-    # ── State complete — convert CSV → xlsx → commit ──────────────────────
-    if not dry_run:
-        if os.path.exists(csv_path):
-            _convert_csv_to_xlsx(csv_path, xlsx_path)
-            _git_commit_xlsx(xlsx_path, state)
-        else:
-            log.info(f"[{state}] No matching rows — no xlsx produced.")
+        # Advance to next page only after the current one is fully processed
+        offset = next_offset
 
+    # ── State complete ────────────────────────────────────────────────────
     log.info(
         f"[{state}] Complete — {rows_written:,} matching rows "
         f"(from {total_raw:,} total records)"
     )
+
+    if not dry_run and os.path.exists(csv_path):
+        _csv_to_xlsx(csv_path, xlsx_path)
+        _git_commit_xlsx(xlsx_path, state, partial=False)
+    elif not dry_run and rows_written == 0:
+        df = pd.DataFrame(columns=OUTPUT_COLUMNS)
+        df.to_excel(xlsx_path, index=False, engine="openpyxl")
+        _git_commit_xlsx(xlsx_path, state, partial=False)
+
     return rows_written
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v8")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v7")
     parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
     parser.add_argument("--state",   type=str, default=None, help="Run a single state")
     parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
@@ -835,6 +952,7 @@ def main() -> None:
         else:
             cp = _load_checkpoint()
 
+        # ── FIX 13: stall detection ───────────────────────────────────────
         runs_without_progress = cp.get("runs_without_progress", 0)
         if runs_without_progress >= MAX_RUNS_WITHOUT_PROGRESS:
             log.error(
@@ -852,10 +970,17 @@ def main() -> None:
         else:
             pending = remaining
 
+    # ── FIX 19-CALL: deduplicate all existing xlsx files before fetching ──
+    # Runs after checkpoint load so in_progress rows_written can be updated
+    # if the partial file for the resuming state is cleaned. Skipped in
+    # --state mode only if you want isolated reruns; included here so a
+    # single-state rerun also cleans its own file before resuming.
+    _dedup_all_existing(cp, dry_run=args.dry_run)
+
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v8  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v7  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID           : {RESOURCE_ID}")
     print(f"  NIC codes loaded      : {len(nic_set)}")
     print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
@@ -863,12 +988,12 @@ def main() -> None:
     print(f"  Request gap           : {MIN_REQUEST_GAP}s → ~{int(3600/MIN_REQUEST_GAP)} req/hr (limit 1,000)")
     print(f"  Deadline              : {RUN_DEADLINE_SECONDS/3600:.2f}h")
     print(f"  Stall limit           : {MAX_RUNS_WITHOUT_PROGRESS} runs without progress")
-    print(f"  Excel row limit       : {EXCEL_MAX_ROWS:,} rows/sheet (splits to multiple sheets if exceeded)")
     print(f"  Output folder         : {OUTPUT_DIR}/suppliers_<State>.xlsx")
     print(f"{'═'*64}\n")
 
     total_suppliers    = 0
     completed_this_run = 0
+    deadline_hit       = False   # FIX 17
 
     for i, state in enumerate(pending, 1):
         log.info(f"[{i:02d}/{len(pending)}] ── {state.title()} ──")
@@ -885,30 +1010,16 @@ def main() -> None:
             cp["completed"]             = sorted(completed_list)
             cp["failed"]                = [s for s in cp.get("failed", []) if s != state]
             cp["in_progress"]           = None
-            cp["runs_without_progress"] = 0   # full completion resets stall counter
+            cp["runs_without_progress"] = 0
 
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
 
         except DeadlineReached:
             log.info("Deadline caught in main loop — stopping immediately.")
-            if not args.state and not args.dry_run:
-                # FIX 16: reset stall counter if partial xlsx was saved,
-                # only increment if truly nothing was saved this run
-                partial_saved = os.path.exists(_xlsx_path_for(state))
-                if completed_this_run > 0 or partial_saved:
-                    cp["runs_without_progress"] = 0
-                    log.info(
-                        f"Progress made this run "
-                        f"({'partial xlsx saved' if partial_saved else 'state(s) completed'}) "
-                        f"— stall counter reset to 0."
-                    )
-                else:
-                    cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
-                    log.warning(
-                        f"No progress this run — stall counter now "
-                        f"{cp['runs_without_progress']}/{MAX_RUNS_WITHOUT_PROGRESS}."
-                    )
+            deadline_hit = True
+            if completed_this_run == 0 and not args.state and not args.dry_run:
+                cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
                 _save_checkpoint(cp)
             break
 
@@ -921,21 +1032,15 @@ def main() -> None:
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
 
-    # ── Stall counter update for non-deadline exits ───────────────────────
-    # Only reached if the loop finished without a DeadlineReached exception.
-    # If nothing completed and no partial xlsx exists for any pending state,
-    # increment the stall counter (FIX 16).
-    if completed_this_run == 0 and not args.state and not args.dry_run:
-        completed_set = set(cp.get("completed", []))
-        pending_states = [s for s in STATES_AND_UTS if s not in completed_set]
-        any_partial = any(os.path.exists(_xlsx_path_for(s)) for s in pending_states)
-        if not any_partial:
-            cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
-            log.warning(
-                f"No progress this run — stall counter now "
-                f"{cp['runs_without_progress']}/{MAX_RUNS_WITHOUT_PROGRESS}."
-            )
-            _save_checkpoint(cp)
+    # ── FIX 17: post-loop stall counter (non-deadline exits only) ─────────
+    if (
+        completed_this_run == 0
+        and not deadline_hit
+        and not args.state
+        and not args.dry_run
+    ):
+        cp["runs_without_progress"] = cp.get("runs_without_progress", 0) + 1
+        _save_checkpoint(cp)
 
     completed_set = set(cp.get("completed", []))
     still_pending = [s for s in STATES_AND_UTS if s not in completed_set]
@@ -977,19 +1082,18 @@ if __name__ == "__main__":
 # ─────────────────────────────────────────────────────────────────────────────
 #  TIMING REFERENCE  (1000 records/page, 4.5s gap → 800 req/hr)
 # ─────────────────────────────────────────────────────────────────────────────
-# State                    Est. records    Pages     Time
-# ──────────────────────── ─────────────── ───────   ────────
-# Uttar Pradesh              ~10,000,000   10,000   ~12.5 hrs  (3 runs)
-# Maharashtra                 ~7,000,000    7,000   ~8.75 hrs  (2 runs)
-# Gujarat                     ~5,000,000    5,000   ~6.25 hrs  (2 runs)
-# Rajasthan                   ~4,000,000    4,000   ~5.0  hrs  (1 run)
-# Tamil Nadu                  ~4,000,000    4,000   ~5.0  hrs  (1 run)
-# West Bengal                 ~3,500,000    3,500   ~4.4  hrs  (1 run)
-# Madhya Pradesh              ~3,000,000    3,000   ~3.75 hrs  (1 run)
-# Karnataka                   ~3,000,000    3,000   ~3.75 hrs  (1 run)
-# Andhra Pradesh              ~2,500,000    2,500   ~3.1  hrs  (1 run)
-# Bihar                       ~2,500,000    2,500   ~3.1  hrs  (1 run)
-# ... (26 smaller states)    ~15,000,000   15,000   ~18.75 hrs (~4 runs)
-# ──────────────────────── ─────────────── ───────   ────────
-# TOTAL                      ~62,500,000   62,500   ~78 hrs (~13-15 runs)
-# Partial xlsx saved every run — no data ever discarded on deadline.
+# State                    Est. records   Pages    Time
+# ──────────────────────── ────────────── ──────   ──────
+# Uttar Pradesh                  950,000     951   ~1.19 hrs
+# Maharashtra                    700,000     700   ~0.88 hrs
+# Gujarat                        650,000     650   ~0.81 hrs
+# Rajasthan                      500,000     500   ~0.63 hrs
+# Tamil Nadu                     480,000     480   ~0.60 hrs
+# West Bengal                    420,000     420   ~0.53 hrs
+# Madhya Pradesh                 380,000     380   ~0.48 hrs
+# Karnataka                      360,000     360   ~0.45 hrs
+# Andhra Pradesh                 310,000     310   ~0.39 hrs
+# Bihar                          300,000     300   ~0.38 hrs
+# ... (26 smaller states)      1,697,500   1,698   ~2.12 hrs
+# ──────────────────────── ────────────── ──────   ──────
+# TOTAL                        7,247,500   7,249   ~9.1 hrs
