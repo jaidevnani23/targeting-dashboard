@@ -3,12 +3,14 @@ name: Update Suppliers
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'   # adjust as needed
+    - cron: '0 0 * * *'
 
 jobs:
   fetch-suppliers:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: write        # ← critical for GITHUB_TOKEN to push
     outputs:
       run_incomplete: ${{ steps.run_fetcher.outputs.incomplete || 'true' }}
       data_pushed:    ${{ steps.commit_data.outputs.pushed }}
@@ -18,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}   # uses PAT if set, otherwise GITHUB_TOKEN
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,11 +30,32 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas openpyxl
 
-      # ── FIX: git config BEFORE the fetcher so per-state commits work ──
+      # ── Must be before the fetcher so per-state git commits work (FIX 15) ──
       - name: Configure git
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Configure the remote to use the token explicitly so pushes
+          # work on auto-triggered runs, not just manual ones
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - name: Verify git push access
+        run: |
+          git pull --rebase origin main
+          echo "test" > data/suppliers/.push_test 2>/dev/null || true
+          git add data/suppliers/.push_test 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: verify push access [run ${{ github.run_number }}]"
+            if git push; then
+              echo "✓ Push access confirmed"
+              git push origin --delete .push_test 2>/dev/null || true
+            else
+              echo "::error::Push FAILED — per-state commits will not work. Check token permissions."
+              exit 1
+            fi
+          else
+            echo "✓ Push access OK"
+          fi
 
       - name: Run MSME supplier fetcher
         id: run_fetcher
@@ -46,9 +70,8 @@ jobs:
           elif [ "${EXIT:-0}" = "3" ]; then echo "incomplete=stop"  >> "$GITHUB_OUTPUT"
           else echo "incomplete=true" >> "$GITHUB_OUTPUT"
           fi
-          exit 0   # don't fail the step; retrigger logic handles exit codes
+          exit 0
 
-      # ── Commit whatever is still on disk (checkpoint + any unpushed xlsx) ──
       - name: Commit and push supplier data
         id: commit_data
         run: |
@@ -79,7 +102,6 @@ jobs:
           echo "pushed=false" >> "$GITHUB_OUTPUT"
           exit 1
 
-      # ── Only verify output when the run fully completed ──
       - name: Verify output files
         if: steps.run_fetcher.outputs.incomplete == 'false'
         run: |
@@ -97,22 +119,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait before retrigger
-        run: sleep 1200   # 20 minutes
-
-      - name: Check for stop sentinel
-        id: check_stop
-        run: |
-          if [ -f "STOP_SUPPLIERS_FETCH" ]; then
-            echo "stop=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "stop=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: sleep 1200
 
       - name: Retrigger workflow
-        if: steps.check_stop.outputs.stop != 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner:   context.repo.owner,
