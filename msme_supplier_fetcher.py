@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v7
+MSME Supplier Fetcher  —  Production v8
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -16,7 +16,7 @@ Exit codes (read by GitHub Actions):
     2  — states still pending (deadline/partial); workflow auto-retriggers
     3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v6  (v7)
+CHANGES vs v7  (v8)
 ---------------------
 FIX 19-CALL — _dedup_all_existing() is now actually called in main().
 
@@ -447,7 +447,7 @@ def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
             df[col] = ""
     df = df[OUTPUT_COLUMNS]
 
-    tmp_path = xlsx_path + ".tmp"
+    tmp_path = xlsx_path.replace(".xlsx", "_dedup_tmp.xlsx")
     df.to_excel(tmp_path, index=False, engine="openpyxl")
     os.replace(tmp_path, xlsx_path)
 
@@ -501,7 +501,7 @@ def _dedup_xlsx(xlsx_path: str) -> int:
             df_clean[col] = ""
     df_clean = df_clean[OUTPUT_COLUMNS]
 
-    tmp_path = xlsx_path + ".tmp"
+    tmp_path = xlsx_path.replace(".xlsx", "_dedup_tmp.xlsx")
     try:
         df_clean.to_excel(tmp_path, index=False, engine="openpyxl")
         os.replace(tmp_path, xlsx_path)
@@ -710,6 +710,73 @@ def _xlsx_path_for(state: str) -> str:
     return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.xlsx")
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  COMPLETED-STATE RECONCILIATION  (FIX 24)
+#
+#  Handles the case where a state's xlsx was pushed to the repo but the
+#  checkpoint was not (e.g. the commit step failed with exit code 128).
+#  On the next run the state appears in `pending` even though its data is
+#  already complete on disk, causing an unnecessary re-fetch or a mismatch-
+#  triggered restart.
+#
+#  This function runs once after checkpoint load. For every state whose xlsx
+#  exists on disk with at least one row, and which is NOT already in
+#  `completed` and is NOT the current `in_progress` state, it auto-adds the
+#  state to `completed` and saves the checkpoint. The state is then skipped
+#  by the main loop entirely.
+# ─────────────────────────────────────────────────────────────────────────────
+def _reconcile_completed_from_disk(cp: dict, dry_run: bool) -> None:
+    """
+    Auto-mark states as completed when their xlsx exists on disk but the
+    checkpoint does not know about them yet (stale checkpoint after a failed
+    push).
+    """
+    if not os.path.isdir(OUTPUT_DIR):
+        return
+
+    completed  = set(cp.get("completed", []))
+    ip_state   = (cp.get("in_progress") or {}).get("state", "")
+    newly_done = []
+
+    for state in STATES_AND_UTS:
+        if state in completed:
+            continue
+        if state == ip_state:
+            # Leave in_progress states to the normal resume logic
+            continue
+        xlsx_path = _xlsx_path_for(state)
+        if not os.path.exists(xlsx_path):
+            continue
+        row_count = _count_xlsx_rows(xlsx_path)
+        if row_count > 0:
+            log.info(
+                f"[{state}] xlsx exists on disk with {row_count:,} rows but "
+                f"is not in checkpoint completed list — marking as complete (FIX 24)."
+            )
+            newly_done.append(state)
+
+    if not newly_done:
+        return
+
+    completed_list = cp.get("completed", [])
+    for state in newly_done:
+        if state not in completed_list:
+            completed_list.append(state)
+    cp["completed"] = sorted(completed_list)
+
+    if not dry_run:
+        _save_checkpoint(cp)
+        log.info(
+            f"Reconciliation: added {len(newly_done)} state(s) to completed: "
+            + ", ".join(s.title() for s in newly_done)
+        )
+    else:
+        log.info(
+            f"Reconciliation [dry-run]: would mark {len(newly_done)} state(s) as completed: "
+            + ", ".join(s.title() for s in newly_done)
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  PROCESS ONE STATE
 # ─────────────────────────────────────────────────────────────────────────────
 def process_state(
@@ -750,10 +817,28 @@ def process_state(
             rows_written = 0
             if os.path.exists(xlsx_path):
                 os.remove(xlsx_path)
-        elif on_disk_rows != saved_rows_written:
+        elif on_disk_rows > saved_rows_written:
+            # FIX 24: the file is larger than the checkpoint recorded — this
+            # means the state completed in a prior run but the checkpoint push
+            # failed, leaving rows_written stale. Treat it as done: mark
+            # completed in the checkpoint and return 0 (nothing to re-fetch).
+            log.info(
+                f"[{state}] {source_label} has {on_disk_rows:,} rows which exceeds "
+                f"checkpoint rows_written={saved_rows_written:,} — state was likely "
+                f"completed but checkpoint was not pushed. Marking as complete."
+            )
+            completed_list = cp.get("completed", [])
+            if state not in completed_list:
+                completed_list.append(state)
+            cp["completed"]   = sorted(completed_list)
+            cp["in_progress"] = None
+            if not dry_run:
+                _save_checkpoint(cp)
+            return on_disk_rows
+        elif on_disk_rows < saved_rows_written:
             log.warning(
                 f"[{state}] {source_label} has {on_disk_rows:,} rows but "
-                f"checkpoint says {saved_rows_written:,} — restarting from 0."
+                f"checkpoint says {saved_rows_written:,} — file is truncated, restarting from 0."
             )
             for p in (csv_path, xlsx_path):
                 if os.path.exists(p):
@@ -925,7 +1010,7 @@ def process_state(
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v7")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v8")
     parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
     parser.add_argument("--state",   type=str, default=None, help="Run a single state")
     parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
@@ -970,17 +1055,31 @@ def main() -> None:
         else:
             pending = remaining
 
+    # ── FIX 24: reconcile completed states from disk before fetching ─────
+    # Runs first so that states whose xlsx exists on disk but are missing
+    # from the checkpoint (due to a failed push) are marked completed and
+    # removed from pending before dedup or fetching begins.
+    if not args.state:
+        _reconcile_completed_from_disk(cp, dry_run=args.dry_run)
+        # Rebuild pending after reconciliation so newly-completed states
+        # are excluded from the loop.
+        completed = set(cp.get("completed", []))
+        ip_state  = (cp.get("in_progress") or {}).get("state")
+        remaining = [s for s in STATES_AND_UTS if s not in completed]
+        if ip_state and ip_state in remaining:
+            pending = [ip_state] + [s for s in remaining if s != ip_state]
+        else:
+            pending = remaining
+
     # ── FIX 19-CALL: deduplicate all existing xlsx files before fetching ──
-    # Runs after checkpoint load so in_progress rows_written can be updated
-    # if the partial file for the resuming state is cleaned. Skipped in
-    # --state mode only if you want isolated reruns; included here so a
-    # single-state rerun also cleans its own file before resuming.
+    # Runs after reconciliation so in_progress rows_written can be updated
+    # if the partial file for the resuming state is cleaned.
     _dedup_all_existing(cp, dry_run=args.dry_run)
 
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v7  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v8  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID           : {RESOURCE_ID}")
     print(f"  NIC codes loaded      : {len(nic_set)}")
     print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
