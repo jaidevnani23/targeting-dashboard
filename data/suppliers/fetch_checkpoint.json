@@ -12,6 +12,11 @@
     "HARYANA"
   ],
   "failed": [],
-  "in_progress": null,
+  "in_progress": {
+    "state": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
+    "next_offset": 0,
+    "xlsx_path": "data/suppliers/suppliers_Dadra_And_Nagar_Haveli_And_Daman_And_Diu.xlsx",
+    "rows_written": 0
+  },
   "runs_without_progress": 0
 }
