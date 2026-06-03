@@ -11,16 +11,17 @@
     "DELHI",
     "GOA",
     "HARYANA",
-    "HIMACHAL PRADESH"
+    "HIMACHAL PRADESH",
+    "JAMMU AND KASHMIR"
   ],
   "failed": [
     "GUJARAT"
   ],
   "in_progress": {
-    "state": "JAMMU AND KASHMIR",
-    "next_offset": 565000,
-    "xlsx_path": "data/suppliers/suppliers_Jammu_And_Kashmir.xlsx",
-    "rows_written": 80767
+    "state": "JHARKHAND",
+    "next_offset": 688000,
+    "xlsx_path": "data/suppliers/suppliers_Jharkhand.xlsx",
+    "rows_written": 94918
   },
   "runs_without_progress": 0
 }
