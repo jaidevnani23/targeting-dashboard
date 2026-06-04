@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v8
+MSME Supplier Fetcher  —  Production v9
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -16,53 +16,37 @@ Exit codes (read by GitHub Actions):
     2  — states still pending (deadline/partial); workflow auto-retriggers
     3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v7  (v8)
+CHANGES vs v8  (v9)
 ---------------------
-FIX 19-CALL — _dedup_all_existing() is now actually called in main().
+FIX 25 — _dedup_xlsx tmp file is cleaned up in a finally block.
 
-    Problem: the function was defined and fully documented in v6 but was
-    never invoked anywhere in main(), so deduplication never ran.
+    Problem: if the process was killed between df_clean.to_excel() completing
+    and os.replace() running (e.g. GitHub Actions hard-killing at
+    timeout-minutes ceiling), the _dedup_tmp.xlsx file was left on disk.
+    _dedup_all_existing then committed it via the git add sweep because it
+    matched the suppliers_*.xlsx glob, replacing the real output file with
+    a wrongly-named tmp file and causing the state to appear as failed on
+    the next run.
 
-    Solution: _dedup_all_existing(cp, dry_run=args.dry_run) is called in
-    main() after the checkpoint is loaded and before the state loop begins,
-    matching the documented intent.
+    Solution: a finally block removes the tmp file if it still exists after
+    the try/except, so an interrupted write can never leave an orphaned tmp.
 
-FIX 20 — Short-page retry now re-fetches the same offset.
+FIX 26 — _csv_to_xlsx tmp file is cleaned up in a finally block.
 
-    Problem: when a short page triggered a retry, the loop decremented
-    page_num but the for-loop variable `offset` still advanced to
-    offset + BATCH_SIZE on the next iteration, so retries were fetching
-    the wrong page entirely.
+    Same problem and same solution as FIX 25 but for the _tmp.xlsx file
+    written by _csv_to_xlsx. Previously an interrupted write here would
+    also leave an orphaned _tmp.xlsx on disk.
 
-    Solution: the pagination loop is restructured so that `offset` is
-    managed manually (not by range()). On a short-page retry the offset
-    is not incremented, so the next iteration re-fetches the same offset.
+FIX 27 — _dedup_all_existing excludes tmp files from the os.listdir scan.
 
-FIX 21 — Workflow comment corrected to match FIX 16 behavior.
+    Problem: both _tmp.xlsx and _dedup_tmp.xlsx matched the
+    `p.startswith("suppliers_") and p.endswith(".xlsx")` filter used to
+    build the list of files to dedup and later to git-add. This meant
+    orphaned tmp files (from FIX 25/26 scenarios) were treated as real
+    output files and committed.
 
-    Problem: the workflow YAML comment in the "Run MSME supplier fetcher"
-    step still said "Partial CSVs from deadline interrupts are discarded —
-    the state re-fetches from offset 0 next run", which is the pre-FIX-16
-    behavior. The script has saved partial xlsx files on deadline and
-    resumed from the saved offset since v6.
-
-    Solution: the comment is updated in the workflow YAML (see
-    update_suppliers.yml). No script logic changes needed.
-
-FIX 22 — git clean now uses --exclude in all steps that precede pull --rebase.
-
-    Problem: FIX 18 claimed to add --exclude globs to git clean calls in
-    the workflow, but the actual YAML contained bare `git clean -fd` in
-    both the "Verify git push access" and "Commit and push supplier data"
-    steps, which would delete committed-but-not-yet-pushed xlsx files and
-    the checkpoint, breaking the retrigger chain.
-
-    Solution: all `git clean -fd` calls in the workflow that precede a
-    `git pull --rebase` now use:
-        git clean -fd \
-          --exclude=data/suppliers/suppliers_*.xlsx \
-          --exclude=data/suppliers/fetch_checkpoint.json
-    See update_suppliers.yml for the full change. No script logic changes.
+    Solution: add `and "_tmp" not in p` to the listdir filter. This covers
+    both suffix variants (_tmp.xlsx and _dedup_tmp.xlsx) with one check.
 
 Earlier fixes (retained):
     FIX 1  — urllib3 Retry excludes 429 from status_forcelist.
@@ -81,9 +65,10 @@ Earlier fixes (retained):
     FIX 16 — Save partial xlsx on deadline so the next run can resume.
     FIX 17 — Strip illegal XML control characters before writing xlsx.
     FIX 18 — Workflow git clean no longer deletes untracked output files.
-             (Completed properly in v8 — see FIX 22 above.)
     FIX 19 — Deduplicate all existing xlsx files before fetching begins.
-             (Call added in v8 — see FIX 19-CALL above.)
+    FIX 20 — Short-page retry now re-fetches the same offset.
+    FIX 21 — Workflow comment corrected to match FIX 16 behavior.
+    FIX 22 — git clean uses --exclude in all steps that precede pull --rebase.
     FIX 23 — git checkout -- . before git clean + pull in workflow steps.
     FIX 24 — Reconcile completed states from disk on startup.
 
@@ -470,6 +455,9 @@ def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
     """
     Convert the ephemeral CSV to xlsx, applying sanitisation (FIX 17) and
     deduplication (FIX 19) before writing, then delete the CSV.
+
+    FIX 26: tmp file is always removed in a finally block so an interrupted
+    write can never leave an orphaned _tmp.xlsx on disk.
     """
     df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig")
     for col in OUTPUT_COLUMNS:
@@ -485,8 +473,19 @@ def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
         log.info(f"[{os.path.basename(xlsx_path)}] Dedup removed {removed:,} duplicate rows ({len(df):,} remain).")
 
     tmp_path = xlsx_path.replace(".xlsx", "_tmp.xlsx")
-    df.to_excel(tmp_path, index=False, engine="openpyxl")
-    os.replace(tmp_path, xlsx_path)
+    try:
+        df.to_excel(tmp_path, index=False, engine="openpyxl")
+        os.replace(tmp_path, xlsx_path)
+    except Exception as exc:
+        log.warning(f"Could not write xlsx {os.path.basename(xlsx_path)} ({exc})")
+        return
+    finally:
+        # FIX 26: clean up tmp file even if the process is killed mid-write
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
     size_mb = os.path.getsize(xlsx_path) / 1024 / 1024
     log.info(f"xlsx written: {xlsx_path} ({size_mb:.2f} MB, {len(df):,} rows)")
@@ -527,6 +526,9 @@ def _dedup_xlsx(xlsx_path: str) -> int:
     Deduplicate an existing xlsx file in-place (atomic write via tmp file).
     Returns the number of duplicate rows removed. 0 if already clean.
     Uses all OUTPUT_COLUMNS as the dedup key (Option A — exact match).
+
+    FIX 25: tmp file is always removed in a finally block so an interrupted
+    write can never leave an orphaned _dedup_tmp.xlsx on disk.
     """
     try:
         df = pd.read_excel(xlsx_path, dtype=str, engine="openpyxl").fillna("")
@@ -552,11 +554,14 @@ def _dedup_xlsx(xlsx_path: str) -> int:
         os.replace(tmp_path, xlsx_path)
     except Exception as exc:
         log.warning(f"Dedup: could not write {os.path.basename(xlsx_path)} ({exc}) — original unchanged.")
+        return 0
+    finally:
+        # FIX 25: clean up tmp file even if the process is killed mid-write
         try:
-            os.remove(tmp_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except OSError:
             pass
-        return 0
 
     log.info(
         f"Dedup: {os.path.basename(xlsx_path)} — removed {removed:,} duplicate rows "
@@ -573,6 +578,10 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
     For partial files (state listed in cp['in_progress']), rows_written
     in the checkpoint is updated to the post-dedup row count so the
     resume logic in process_state() does not reset to offset 0.
+
+    FIX 27: tmp files (_tmp.xlsx, _dedup_tmp.xlsx) are excluded from the
+    scan so orphaned tmp files are never treated as real output files and
+    never accidentally committed to the repo.
     """
     if not os.path.isdir(OUTPUT_DIR):
         return
@@ -580,9 +589,11 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
     xlsx_files = sorted(
         p for p in os.listdir(OUTPUT_DIR)
         if p.startswith("suppliers_") and p.endswith(".xlsx")
+        and "_tmp" not in p  # FIX 27: exclude _tmp.xlsx and _dedup_tmp.xlsx
     )
 
     if not xlsx_files:
+        log.info("Dedup: no existing xlsx files to scan.")
         return
 
     log.info(f"Dedup: scanning {len(xlsx_files)} existing xlsx file(s) …")
@@ -605,6 +616,8 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
                 dupes = len(df) - len(df.drop_duplicates(subset=OUTPUT_COLUMNS))
                 if dupes:
                     log.info(f"Dedup [dry-run]: {fname} — would remove {dupes:,} duplicate rows")
+                else:
+                    log.info(f"Dedup [dry-run]: {fname} — already clean")
             except Exception as exc:
                 log.warning(f"Dedup [dry-run]: could not read {fname} ({exc})")
             continue
@@ -612,6 +625,7 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
         removed = _dedup_xlsx(xlsx_path)
 
         if removed == 0:
+            log.info(f"Dedup: {fname} — already clean")
             continue
 
         any_changed = True
@@ -657,6 +671,8 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
                         subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
         except subprocess.CalledProcessError as exc:
             log.warning(f"Dedup: git operation failed ({exc}) — workflow commit step will pick this up.")
+    elif not dry_run and not any_changed:
+        log.info("Dedup: all existing files already clean — nothing to commit.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1059,7 +1075,7 @@ def process_state(
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v8")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v9")
     parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
     parser.add_argument("--state",   type=str, default=None, help="Run a single state")
     parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
@@ -1126,7 +1142,7 @@ def main() -> None:
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v8  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v9  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID           : {RESOURCE_ID}")
     print(f"  NIC codes loaded      : {len(nic_set)}")
     print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
@@ -1139,7 +1155,7 @@ def main() -> None:
 
     total_suppliers    = 0
     completed_this_run = 0
-    deadline_hit       = False   # FIX 17
+    deadline_hit       = False
 
     for i, state in enumerate(pending, 1):
         log.info(f"[{i:02d}/{len(pending)}] ── {state.title()} ──")
@@ -1178,7 +1194,7 @@ def main() -> None:
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
 
-    # ── FIX 17: post-loop stall counter (non-deadline exits only) ─────────
+    # ── Post-loop stall counter (non-deadline exits only) ─────────────────
     if (
         completed_this_run == 0
         and not deadline_hit
