@@ -12,7 +12,6 @@
   --txt: #111827; --txt2: #374151; --txt3: #6B7280; --txt4: #9CA3AF;
   --green: #15803D; --green-lt: #DCFCE7; --amber: #92400E; --amber-lt: #FEF3C7;
   --row-alt: #F8FAFD; --orange: #C2410C; --orange-lt: #FFF7ED;
-  --review-accent: #7C3AED; --review-lt: #F5F3FF;
 }
 [data-theme="dark"] {
   --bg: #000000; --white: #1A1A1A; --navy: #2D3748; --blue: #60A5FA;
@@ -20,7 +19,6 @@
   --txt: #F9FAFB; --txt2: #E5E7EB; --txt3: #9CA3AF; --txt4: #6B7280;
   --green: #34D399; --green-lt: #1F4D38; --amber: #FBBF24; --amber-lt: #78350F;
   --row-alt: #0D0D0D; --orange: #FB923C; --orange-lt: #431407;
-  --review-accent: #A78BFA; --review-lt: #2D1F4E;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 13px; }
@@ -28,17 +26,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .shell { max-width: 1600px; margin: 0 auto; padding: 16px; }
 
 /* ── TOPBAR ── */
-.topbar { display: flex; align-items: center; gap: 12px; background: var(--navy); color: #fff; padding: 12px 20px; border-radius: 10px 10px 0 0; flex-wrap: wrap; }
-.topbar-title { font-size: 15px; font-weight: 700; flex: 1; min-width: 160px; }
+.topbar { display: flex; align-items: center; gap: 12px; background: var(--navy); color: #fff; padding: 12px 20px; border-radius: 10px 10px 0 0; }
+.topbar-title { font-size: 15px; font-weight: 700; flex: 1; }
 .topbar-title span { opacity: .6; font-weight: 400; font-size: 12px; margin-left: 8px; }
 .side-toggle { display: flex; gap: 4px; background: rgba(255,255,255,.12); padding: 4px; border-radius: 8px; }
-.side-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; border: none; cursor: pointer; color: rgba(255,255,255,.7); background: transparent; transition: all .15s; white-space: nowrap; }
+.side-btn { padding: 6px 16px; border-radius: 6px; font-size: 12px; font-weight: 600; border: none; cursor: pointer; color: rgba(255,255,255,.7); background: transparent; transition: all .15s; }
 .side-btn.active { background: #fff; color: var(--navy); }
-.side-btn.active.review-tab { background: #EDE9FE; color: #5B21B6; }
 .topbar-actions { display: flex; gap: 8px; }
 .refresh-btn { padding: 7px 14px; border-radius: 7px; font-size: 12px; font-weight: 600; border: 1.5px solid rgba(255,255,255,.3); background: rgba(255,255,255,.1); color: #fff; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
 .refresh-btn:hover { background: rgba(255,255,255,.2); }
-.refresh-btn:disabled { opacity: .4; cursor: not-allowed; }
 .refresh-btn.spinning svg { animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -50,136 +46,72 @@ select:focus, input[type=text]:focus { border-color: var(--blue); }
 input[type=text] { min-width: 190px; }
 .filter-label { font-size: 11px; font-weight: 600; color: var(--txt3); white-space: nowrap; }
 
+/* State select — mandatory highlight */
 select.mandatory { border-color: var(--blue); font-weight: 600; }
 select.mandatory-empty { border-color: #E5830A; background: #FFFBF0; color: #92400E; }
 [data-theme="dark"] select.mandatory-empty { background: #2A1F00; color: #FBBF24; }
 
+/* Upload strip */
 .upload-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .upload-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1.5px solid var(--bdr); background: var(--white); color: var(--txt2); cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
 .upload-btn:hover { border-color: var(--blue); color: var(--blue); }
 .file-badge { padding: 4px 10px; background: var(--blue-lt); color: var(--blue); border-radius: 20px; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
 .file-badge.supply { background: var(--teal-lt); color: var(--teal); }
-.file-badge.review { background: var(--review-lt); color: var(--review-accent); }
 
 /* ── CHUNK BANNER ── */
-.chunk-banner { display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: var(--orange-lt); border: 1px solid var(--bdr); border-top: none; flex-wrap: wrap; }
+.chunk-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--orange-lt);
+  border: 1px solid var(--bdr);
+  border-top: none;
+  flex-wrap: wrap;
+}
 .chunk-banner.show { display: flex; }
 .chunk-info { font-size: 12px; font-weight: 600; color: var(--orange); display: flex; align-items: center; gap: 8px; }
 .chunk-info svg { flex-shrink: 0; }
 .chunk-actions { display: flex; gap: 8px; align-items: center; }
-.chunk-btn { padding: 7px 18px; border-radius: 7px; font-size: 12px; font-weight: 700; border: none; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
+.chunk-btn {
+  padding: 7px 18px; border-radius: 7px; font-size: 12px; font-weight: 700;
+  border: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  transition: all .15s;
+}
 .chunk-btn-next { background: var(--navy); color: #fff; }
 .chunk-btn-next:hover:not(:disabled) { background: var(--blue); }
 .chunk-btn-next:disabled { opacity: .4; cursor: not-allowed; }
 .chunk-btn-prev { background: transparent; color: var(--txt2); border: 1.5px solid var(--bdr); }
 .chunk-btn-prev:hover:not(:disabled) { border-color: var(--navy); color: var(--navy); }
 .chunk-btn-prev:disabled { opacity: .35; cursor: not-allowed; }
+.chunk-progress { font-size: 11px; color: var(--txt3); }
 
-/* ── REVIEW PANEL ── */
-#review-panel { display: none; }
-#review-panel.show { display: block; }
-
-.review-hero {
-  background: var(--white); border: 1px solid var(--bdr); border-top: none;
-  padding: 36px 32px; display: flex; flex-direction: column; align-items: center;
-  gap: 12px; text-align: center;
+/* ── STATE PROMPT (shown when supply tab is active and no state selected) ── */
+.state-prompt {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 70px 20px;
+  gap: 14px;
+  text-align: center;
 }
-.review-hero-icon { font-size: 40px; }
-.review-hero-title { font-size: 17px; font-weight: 800; color: var(--txt); }
-.review-hero-sub { font-size: 13px; color: var(--txt3); max-width: 520px; line-height: 1.6; }
-.review-steps { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
-.review-step {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 16px; border-radius: 10px;
-  background: var(--bg); border: 1.5px solid var(--bdr);
-  font-size: 12px; color: var(--txt2); font-weight: 500;
-}
-.review-step-num {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: var(--review-accent); color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 800; flex-shrink: 0;
-}
-.review-upload-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
-.review-upload-btn {
-  padding: 10px 22px; border-radius: 8px; font-size: 13px; font-weight: 700;
-  border: 2px solid var(--review-accent); background: var(--review-lt);
-  color: var(--review-accent); cursor: pointer; display: flex; align-items: center;
-  gap: 8px; transition: all .15s;
-}
-.review-upload-btn:hover { background: var(--review-accent); color: #fff; }
-.review-download-btn {
-  padding: 10px 22px; border-radius: 8px; font-size: 13px; font-weight: 700;
-  border: 2px solid var(--navy); background: var(--navy);
-  color: #fff; cursor: pointer; display: flex; align-items: center;
-  gap: 8px; transition: all .15s;
-}
-.review-download-btn:hover { background: var(--blue); border-color: var(--blue); }
-.review-download-btn:disabled { opacity: .4; cursor: not-allowed; }
-
-/* Review table container */
-.review-table-wrap {
-  background: var(--white); border: 1px solid var(--bdr); border-top: none;
-  border-radius: 0 0 10px 10px; overflow: hidden; display: none;
-}
-.review-table-wrap.show { display: block; }
-.review-toolbar {
-  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  border-bottom: 1px solid var(--bdr); flex-wrap: wrap;
-  background: var(--review-lt);
-}
-.review-toolbar-title { font-size: 13px; font-weight: 700; color: var(--review-accent); flex: 1; }
-.review-stats { display: flex; gap: 14px; flex-wrap: wrap; }
-.review-stat { font-size: 11px; color: var(--txt3); }
-.review-stat strong { color: var(--txt); font-weight: 700; }
-.review-filter { padding: 6px 10px; border: 1.5px solid var(--bdr); border-radius: 6px; font-size: 12px; background: var(--white); color: var(--txt); }
-
-.review-scroll { overflow-x: auto; max-height: 55vh; overflow-y: auto; }
-.review-table { width: 100%; border-collapse: collapse; }
-.review-table thead { position: sticky; top: 0; z-index: 2; }
-.review-table th { padding: 9px 12px; text-align: left; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--txt2); background: #F4F6FA; border-bottom: 2px solid var(--bdr); white-space: nowrap; }
-.review-table td { padding: 6px 10px; font-size: 12px; color: var(--txt); border-bottom: 1px solid #F0F2F6; vertical-align: middle; }
-.review-table tbody tr:nth-child(even) td { background: var(--row-alt); }
-.review-table tbody tr:hover td { background: #F0EFF9 !important; }
-
-/* Inline editable Search Term cell */
-.search-term-input {
-  width: 100%; min-width: 180px; padding: 5px 8px;
-  border: 1.5px solid var(--bdr); border-radius: 5px;
-  font-size: 12px; color: var(--txt); background: #FFFBF0;
-  outline: none; transition: border-color .15s;
-}
-.search-term-input:focus { border-color: var(--review-accent); background: #fff; }
-.search-term-input.filled { background: #EBF2FF; border-color: var(--blue); color: var(--navy); }
-
-/* Delete row btn */
-.del-btn { width: 24px; height: 24px; border-radius: 5px; border: 1.5px solid #FCA5A5; background: #FFF1F1; color: #DC2626; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .12s; flex-shrink: 0; }
-.del-btn:hover { background: #DC2626; color: #fff; border-color: #DC2626; }
-
-/* Approved / pending badges */
-.badge-approved { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; background: var(--green-lt); color: var(--green); }
-.badge-pending  { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; background: var(--amber-lt); color: var(--amber); }
-
-.review-empty { padding: 60px 20px; text-align: center; color: var(--txt4); font-size: 13px; }
-.review-empty-icon { font-size: 36px; margin-bottom: 10px; opacity: .5; }
-
-/* Review bottom bar */
-.review-bottombar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid var(--bdr); background: #FAFBFD; flex-wrap: wrap; gap: 8px; }
-.review-bottombar-info { font-size: 11px; color: var(--txt3); }
-.review-actions { display: flex; gap: 8px; }
-.btn-primary { padding: 8px 20px; border-radius: 7px; font-size: 12px; font-weight: 700; border: none; background: var(--navy); color: #fff; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
-.btn-primary:hover { background: var(--blue); }
-.btn-secondary { padding: 8px 16px; border-radius: 7px; font-size: 12px; font-weight: 600; border: 1.5px solid var(--bdr); background: var(--white); color: var(--txt2); cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .15s; }
-.btn-secondary:hover { border-color: var(--navy); color: var(--navy); }
-
-/* ── STATE PROMPT ── */
-.state-prompt { display: none; flex-direction: column; align-items: center; justify-content: center; padding: 70px 20px; gap: 14px; text-align: center; }
 .state-prompt.show { display: flex; }
 .state-prompt-icon { font-size: 48px; opacity: .6; }
 .state-prompt-title { font-size: 16px; font-weight: 700; color: var(--txt2); }
 .state-prompt-sub { font-size: 13px; color: var(--txt3); max-width: 360px; line-height: 1.6; }
-.state-prompt-arrow { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; background: var(--blue-lt); color: var(--blue); font-size: 12px; font-weight: 700; margin-top: 4px; animation: pulse-border 2s ease-in-out infinite; }
-@keyframes pulse-border { 0%, 100% { box-shadow: 0 0 0 0 rgba(26,86,184,.3); } 50% { box-shadow: 0 0 0 6px rgba(26,86,184,0); } }
+.state-prompt-arrow {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: 8px;
+  background: var(--blue-lt); color: var(--blue);
+  font-size: 12px; font-weight: 700; margin-top: 4px;
+  animation: pulse-border 2s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(26,86,184,.3); }
+  50%       { box-shadow: 0 0 0 6px rgba(26,86,184,0); }
+}
 
 /* ── STATS ── */
 .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px; background: var(--bdr); border: 1px solid var(--bdr); border-top: none; }
@@ -187,7 +119,7 @@ select.mandatory-empty { border-color: #E5830A; background: #FFFBF0; color: #924
 .stat-val { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1; }
 .stat-lbl { font-size: 10px; font-weight: 600; color: var(--txt3); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
 
-/* ── TABLE (demand/supply) ── */
+/* ── TABLE ── */
 .table-wrap { background: var(--white); border: 1px solid var(--bdr); border-top: none; border-radius: 0 0 10px 10px; overflow: hidden; }
 .table-scroll { overflow-x: auto; max-height: 62vh; overflow-y: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -201,10 +133,12 @@ td.wrap { white-space: normal; max-width: 280px; }
 td.peak-cell { white-space: normal; max-width: 220px; }
 tbody tr:nth-child(even) td { background: var(--row-alt); }
 tbody tr:hover td { background: #EEF3FB !important; }
+
 .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .tag-rising   { background: var(--green-lt); color: var(--green); }
 .tag-stable   { background: var(--blue-lt);  color: var(--blue); }
 .tag-declining{ background: var(--amber-lt); color: var(--amber); }
+
 .peak-pills { display: flex; flex-wrap: wrap; gap: 3px; }
 .pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; background: #FFF7ED; color: #C2410C; border: 1px solid #FED7AA; }
 .pill-none { color: var(--txt4); font-size: 11px; font-style: italic; }
@@ -217,6 +151,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
 .pg-btn:hover { border-color: var(--navy); color: var(--navy); }
 .pg-btn.active { background: var(--navy); color: #fff; border-color: var(--navy); }
 .pg-btn:disabled { opacity: .35; cursor: not-allowed; }
+
 .empty { padding: 60px 20px; text-align: center; color: var(--txt4); font-size: 13px; }
 .empty-icon { font-size: 36px; margin-bottom: 10px; opacity: .5; }
 
@@ -230,18 +165,14 @@ tbody tr:hover td { background: #EEF3FB !important; }
 /* ── DARK MODE TOGGLE ── */
 .dark-mode-toggle { position: fixed; bottom: 20px; left: 20px; padding: 10px 16px; border-radius: 8px; background: var(--white); border: 2px solid var(--bdr); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: var(--txt2); transition: all .2s; box-shadow: 0 4px 12px rgba(0,0,0,.1); z-index: 50; white-space: nowrap; }
 .dark-mode-toggle:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.15); border-color: var(--blue); color: var(--blue); }
+.dark-mode-toggle:active { transform: translateY(0); }
 
 [data-theme="dark"] .loading-overlay { background: rgba(0,0,0,.9); }
 [data-theme="dark"] th { background: #262626; }
-[data-theme="dark"] .review-table th { background: #262626; }
 [data-theme="dark"] th:hover { background: #333; }
 [data-theme="dark"] tbody tr:hover td { background: #1F1F1F !important; }
-[data-theme="dark"] .review-table tbody tr:hover td { background: #1F1F1F !important; }
 [data-theme="dark"] .pagebar { background: #0A0A0A; }
-[data-theme="dark"] .review-bottombar { background: #0A0A0A; }
 [data-theme="dark"] .chunk-banner { background: var(--orange-lt); }
-[data-theme="dark"] .search-term-input { background: #2A2000; }
-[data-theme="dark"] .search-term-input.filled { background: #1E3A5F; }
 </style>
 </head>
 <body>
@@ -253,10 +184,9 @@ tbody tr:hover td { background: #EEF3FB !important; }
     <div class="side-toggle">
       <button class="side-btn active" id="btn-demand" onclick="switchSide('demand')">📊 Demand</button>
       <button class="side-btn"        id="btn-supply" onclick="switchSide('supply')">🏭 Supply</button>
-      <button class="side-btn review-tab" id="btn-review" onclick="switchSide('review')">📋 Product Review</button>
     </div>
     <div class="topbar-actions">
-      <button class="refresh-btn" id="download-btn" onclick="handleDownload()">
+      <button class="refresh-btn" id="download-btn" onclick="downloadFiltered()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download
       </button>
@@ -267,8 +197,9 @@ tbody tr:hover td { background: #EEF3FB !important; }
     </div>
   </div>
 
-  <!-- FILTER BAR (demand + supply only) -->
+  <!-- FILTER BAR -->
   <div class="ctrlbar" id="ctrlbar">
+
     <!-- DEMAND FILTERS -->
     <div class="ctrl-group" id="demand-filters">
       <span class="filter-label">Filter:</span>
@@ -284,7 +215,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
       <select id="d-peakmonth" onchange="applyFilters()"><option value="">All Peak Months</option></select>
     </div>
 
-    <!-- SUPPLY FILTERS -->
+    <!-- SUPPLY FILTERS — state is MANDATORY -->
     <div class="ctrl-group" id="supply-filters" style="display:none">
       <span class="filter-label">State <span style="color:#E5830A;font-size:13px">*</span></span>
       <select id="s-state" onchange="onSupplyStateChange()" class="mandatory-empty">
@@ -326,6 +257,8 @@ tbody tr:hover td { background: #EEF3FB !important; }
         <option value="Uttarakhand">Uttarakhand</option>
         <option value="West_Bengal">West Bengal</option>
       </select>
+
+      <!-- These appear only after state is loaded -->
       <span id="supply-extra-filters" style="display:contents">
         <input type="text" id="s-search"   placeholder="Search enterprise, NIC…" oninput="applyFilters()" style="display:none">
         <select id="s-district" onchange="applyFilters()" style="display:none"><option value="">All Districts</option></select>
@@ -334,7 +267,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
       </span>
     </div>
 
-    <!-- UPLOADS — always visible on demand + supply tabs -->
+    <!-- UPLOADS — always visible on both sides -->
     <div class="upload-strip" id="upload-strip">
       <label class="upload-btn" id="demand-upload-lbl">
         <input type="file" accept=".xlsx,.xls,.csv,.json" style="display:none" id="trends-upload" onchange="handleUpload('trends')">
@@ -349,7 +282,7 @@ tbody tr:hover td { background: #EEF3FB !important; }
     </div>
   </div>
 
-  <!-- CHUNK BANNER -->
+  <!-- SEGMENT NAVIGATION BANNER -->
   <div class="chunk-banner" id="chunk-banner">
     <div class="chunk-info">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
@@ -362,8 +295,8 @@ tbody tr:hover td { background: #EEF3FB !important; }
     </div>
   </div>
 
-  <!-- STATS (demand + supply) -->
-  <div class="stats-row" id="stats-row">
+  <!-- STATS -->
+  <div class="stats-row">
     <div class="stat-cell"><div class="stat-val" id="stat-total">0</div><div class="stat-lbl" id="stat-total-lbl">Total Products</div></div>
     <div class="stat-cell"><div class="stat-val" id="stat-filtered">0</div><div class="stat-lbl" id="stat-filtered-lbl">Selected Products</div></div>
     <div class="stat-cell"><div class="stat-val" id="stat-extra1">0</div><div class="stat-lbl" id="stat-extra1-lbl">Total Categories</div></div>
@@ -371,17 +304,19 @@ tbody tr:hover td { background: #EEF3FB !important; }
     <div class="stat-cell"><div class="stat-val" id="stat-extra3">0</div><div class="stat-lbl" id="stat-extra3-lbl">—</div></div>
   </div>
 
-  <!-- TABLE (demand + supply) -->
-  <div class="table-wrap" id="main-table-wrap">
+  <!-- TABLE -->
+  <div class="table-wrap">
     <div class="table-scroll">
       <table>
         <thead id="table-head"></thead>
         <tbody id="table-body"></tbody>
       </table>
+
+      <!-- Shown when supply tab is active but no state selected -->
       <div class="state-prompt" id="state-prompt">
         <div class="state-prompt-icon">🗺️</div>
         <div class="state-prompt-title">Select a State to View Supplier Data</div>
-        <div class="state-prompt-sub">Supplier records are organised by state. Select a state from the dropdown above to retrieve and explore its registered enterprises.</div>
+        <div class="state-prompt-sub">Supplier records are organised by state. Select a state from the dropdown above to retrieve and explore its registered enterprises — or upload a file directly using the button above.</div>
         <div class="state-prompt-arrow">← Choose a state from the filter bar to begin</div>
       </div>
     </div>
@@ -390,78 +325,6 @@ tbody tr:hover td { background: #EEF3FB !important; }
       <div class="page-btns"   id="page-btns"></div>
     </div>
   </div>
-
-  <!-- ═══════════════════════════════════════════════════════════════════════
-       PRODUCT REVIEW PANEL
-       ═══════════════════════════════════════════════════════════════════════ -->
-  <div id="review-panel">
-
-    <!-- Hero / instructions (shown until file is loaded) -->
-    <div class="review-hero" id="review-hero">
-      <div class="review-hero-icon">📋</div>
-      <div class="review-hero-title">Product Review &amp; Approval</div>
-      <div class="review-hero-sub">
-        Upload the <strong>new_products_suggestions.xlsx</strong> generated by the quarterly discovery run.
-        Fill in Search Terms for the products you want to keep, delete the ones you don't,
-        then download the updated file and commit it to the repo so the updater can process it.
-      </div>
-      <div class="review-steps">
-        <div class="review-step"><div class="review-step-num">1</div> Download suggestions XLSX from Actions run</div>
-        <div class="review-step"><div class="review-step-num">2</div> Upload here &amp; fill in Search Terms inline</div>
-        <div class="review-step"><div class="review-step-num">3</div> Download filled file &amp; push to <code>data/</code></div>
-        <div class="review-step"><div class="review-step-num">4</div> Actions will run <code>product_updater.py</code></div>
-      </div>
-      <div class="review-upload-row">
-        <label class="review-upload-btn">
-          <input type="file" accept=".xlsx,.xls" style="display:none" id="review-upload-input" onchange="handleReviewUpload()">
-          📂 Upload new_products_suggestions.xlsx
-        </label>
-      </div>
-    </div>
-
-    <!-- Table (shown after file load) -->
-    <div class="review-table-wrap" id="review-table-wrap">
-      <div class="review-toolbar">
-        <div class="review-toolbar-title">📋 Product Suggestions</div>
-        <div class="review-stats">
-          <div class="review-stat">Total: <strong id="rv-total">0</strong></div>
-          <div class="review-stat">Approved: <strong id="rv-approved">0</strong></div>
-          <div class="review-stat">Pending: <strong id="rv-pending">0</strong></div>
-          <div class="review-stat">States if approved: <strong id="rv-states">0</strong></div>
-        </div>
-        <select class="review-filter" id="rv-cat-filter" onchange="renderReviewTable()">
-          <option value="">All Categories</option>
-        </select>
-        <select class="review-filter" id="rv-status-filter" onchange="renderReviewTable()">
-          <option value="">All</option>
-          <option value="approved">✅ Approved only</option>
-          <option value="pending">⏳ Pending only</option>
-        </select>
-        <label class="review-upload-btn" style="padding:6px 14px;font-size:12px;">
-          <input type="file" accept=".xlsx,.xls" style="display:none" id="review-replace-input" onchange="handleReviewUpload()">
-          🔄 Replace file
-        </label>
-      </div>
-
-      <div class="review-scroll">
-        <table class="review-table">
-          <thead id="rv-head"></thead>
-          <tbody id="rv-body"></tbody>
-        </table>
-      </div>
-
-      <div class="review-bottombar">
-        <div class="review-bottombar-info" id="rv-bottom-info"></div>
-        <div class="review-actions">
-          <button class="btn-secondary" onclick="reviewDeletePending()">🗑 Remove All Pending</button>
-          <button class="btn-primary"   onclick="downloadReviewedXlsx()" id="rv-download-btn">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Download Reviewed XLSX
-          </button>
-        </div>
-      </div>
-    </div>
-  </div><!-- /review-panel -->
 
 </div><!-- /shell -->
 
@@ -483,22 +346,22 @@ const MONTH_NAMES          = ['January','February','March','April','May','June',
                                'July','August','September','October','November','December'];
 const PEAK_MIN_OCCURRENCES = 4;
 const TOP_N                = 20;
-const CHUNK_SIZE           = 50_000;
-const PAGE_SIZE            = 50;
+const CHUNK_SIZE           = 50_000;   // rows per chunk
+const PAGE_SIZE            = 50;       // rows per table page
 
-const REPO_RAW           = 'https://raw.githubusercontent.com/jaidevnani23/targeting-dashboard/main';
-const TRENDS_JSON_URL    = `${REPO_RAW}/data/dashboard_trends_data.json`;
-const SUPPLIERS_BASE_URL = `${REPO_RAW}/data/suppliers`;
+const REPO_RAW = 'https://raw.githubusercontent.com/jaidevnani23/targeting-dashboard/main';
+const TRENDS_JSON_URL      = `${REPO_RAW}/data/dashboard_trends_data.json`;
+const SUPPLIERS_BASE_URL   = `${REPO_RAW}/data/suppliers`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STATE
 // ─────────────────────────────────────────────────────────────────────────────
 let demandData      = [];
-let supplyData      = [];
-let allSupplyRows   = null;
-let supplyChunkIdx  = 0;
-let filteredChunkIdx = 0;
-let loadedStateName = '';
+let supplyData      = [];   // current window of CHUNK_SIZE rows being displayed
+let allSupplyRows   = null; // full parsed rows from current xlsx (null until fetched)
+let supplyChunkIdx  = 0;    // 0-based index of the current raw (unfiltered) segment
+let filteredChunkIdx = 0;   // 0-based index of the current filtered segment
+let loadedStateName = '';   // which state is currently loaded (underscore format)
 let trendsMap       = {};
 
 let filteredData    = [];
@@ -506,10 +369,6 @@ let currentSide     = 'demand';
 let currentPage     = 1;
 let sortCol         = null;
 let sortDir         = 1;
-
-// Review tab state
-let reviewRows      = [];   // [{...original cols, _deleted: bool}]
-let reviewColOrder  = [];   // original column order from the uploaded file
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INIT
@@ -556,65 +415,96 @@ function buildTrendsMap() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUPPLY STATE SELECTION
+// SUPPLY STATE SELECTION — FETCH FROM GITHUB
 // ─────────────────────────────────────────────────────────────────────────────
 async function onSupplyStateChange() {
-  const sel      = document.getElementById('s-state');
-  const stateKey = sel.value;
+  const sel       = document.getElementById('s-state');
+  const stateKey  = sel.value;
 
+  // Style the select
   sel.classList.toggle('mandatory-empty', !stateKey);
   sel.classList.toggle('mandatory',        !!stateKey);
 
+  // Reset extra filters visibility
   const extraFilters = ['s-search','s-district','s-category','s-niccode'];
   extraFilters.forEach(id => document.getElementById(id).style.display = stateKey ? '' : 'none');
 
   if (!stateKey) {
-    supplyData = []; allSupplyRows = null; supplyChunkIdx = 0;
-    filteredChunkIdx = 0; window._filteredAll = null;
-    window._totalMatchedRows = undefined; loadedStateName = '';
-    filteredData = [];
-    updateChunkBanner(); renderTable(); updateStats(); showStatePrompt(true);
+    // Reset supply state
+    supplyData      = [];
+    allSupplyRows   = null;
+    supplyChunkIdx  = 0;
+    filteredChunkIdx = 0;
+    window._filteredAll = null;
+    window._totalMatchedRows = undefined;
+    loadedStateName = '';
+    filteredData    = [];
+    updateChunkBanner();
+    renderTable();
+    updateStats();
+    showStatePrompt(true);
     return;
   }
 
   showStatePrompt(false);
-  if (stateKey === loadedStateName && allSupplyRows !== null) { applyFilters(); return; }
+
+  if (stateKey === loadedStateName && allSupplyRows !== null) {
+    // Already loaded — just re-apply filters
+    applyFilters();
+    return;
+  }
+
+  // Fetch new state file
   await fetchSupplierFile(stateKey);
 }
 
 async function fetchSupplierFile(stateKey) {
-  const url         = `${SUPPLIERS_BASE_URL}/suppliers_${stateKey}.xlsx`;
+  const url = `${SUPPLIERS_BASE_URL}/suppliers_${stateKey}.xlsx`;
   const displayName = document.getElementById('s-state').options[
-    document.getElementById('s-state').selectedIndex].text;
+    document.getElementById('s-state').selectedIndex
+  ].text;
 
   try {
     showLoading(`Retrieving supplier data for ${displayName}…`, 'This may take a moment for larger states');
+
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
     const buffer = await res.arrayBuffer();
 
     showLoading(`Parsing ${displayName} records…`, 'Processing rows…');
+    // Parse asynchronously to not block UI thread
     await new Promise(r => setTimeout(r, 0));
 
     const wb   = XLSX.read(buffer, { type: 'array' });
     const ws   = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws);
 
-    allSupplyRows = rows.map(enrichSupplyWithCategory);
-    supplyChunkIdx = 0; supplyData = []; loadedStateName = stateKey;
-    loadNextChunk(true);
-    updateLastUpdated(); hideLoading();
+    allSupplyRows   = rows.map(enrichSupplyWithCategory);
+    supplyChunkIdx  = 0;
+    supplyData      = [];
+    loadedStateName = stateKey;
 
+    // Load first chunk
+    loadNextChunk(/* silent */ true);
+
+    updateLastUpdated();
+    hideLoading();
+
+    // Reset sub-filters
     ['s-district','s-category','s-niccode'].forEach(id => {
       const el = document.getElementById(id);
       el.innerHTML = `<option value="">${el.options[0].text}</option>`;
     });
     document.getElementById('s-search').value = '';
+
     applyFilters();
+
   } catch (err) {
     console.error('Supply fetch error:', err);
     hideLoading();
-    alert(`Could not load suppliers for ${displayName}.\n\nError: ${err.message}`);
+    alert(`Could not load suppliers for ${displayName}.\n\nError: ${err.message}\n\nMake sure the file exists: data/suppliers/suppliers_${stateKey}.xlsx`);
+    // Reset dropdown
     document.getElementById('s-state').value = '';
     document.getElementById('s-state').classList.add('mandatory-empty');
     document.getElementById('s-state').classList.remove('mandatory');
@@ -623,29 +513,41 @@ async function fetchSupplierFile(stateKey) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CHUNK MANAGEMENT
+// CHUNK MANAGEMENT  (windowed — only one segment in memory at a time)
 // ─────────────────────────────────────────────────────────────────────────────
 function loadChunk(idx, silent) {
   if (!allSupplyRows) return;
+
+  // If everything fits in a single segment, bypass chunking entirely
   if (allSupplyRows.length <= CHUNK_SIZE) {
-    supplyChunkIdx = 0; supplyData = allSupplyRows;
-    updateChunkBanner();
+    supplyChunkIdx = 0;
+    supplyData     = allSupplyRows;
+    updateChunkBanner(); // will hide banner since totalChunks === 1
     if (!silent) { applyFilters(); document.querySelector('.table-scroll')?.scrollTo(0, 0); }
     return;
   }
+
   const totalChunks = Math.ceil(allSupplyRows.length / CHUNK_SIZE);
   if (idx < 0 || idx >= totalChunks) return;
+
   supplyChunkIdx = idx;
-  const start = idx * CHUNK_SIZE;
-  supplyData  = allSupplyRows.slice(start, Math.min(start + CHUNK_SIZE, allSupplyRows.length));
+  const start    = idx * CHUNK_SIZE;
+  const end      = Math.min(start + CHUNK_SIZE, allSupplyRows.length);
+  supplyData     = allSupplyRows.slice(start, end);
+
   updateChunkBanner();
-  if (!silent) { applyFilters(); document.querySelector('.table-scroll')?.scrollTo(0, 0); }
+  if (!silent) {
+    applyFilters();
+    document.querySelector('.table-scroll')?.scrollTo(0, 0);
+  }
 }
 
+// Kept for call sites that trigger first load
 function loadNextChunk(silent) { loadChunk(0, silent); }
 
 function navigateChunk(direction) {
   if (window._filteredAll) {
+    // Navigating within filtered results
     const totalChunks = Math.ceil(window._filteredAll.length / CHUNK_SIZE);
     const next = filteredChunkIdx + direction;
     if (next < 0 || next >= totalChunks) return;
@@ -654,35 +556,52 @@ function navigateChunk(direction) {
     applyFilters();
     document.querySelector('.table-scroll')?.scrollTo(0, 0);
   } else {
+    // Navigating raw segments
     loadChunk(supplyChunkIdx + direction, false);
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CHUNK BANNER  ← FIXED: hides when filtered/matched rows fit within one segment
+// ─────────────────────────────────────────────────────────────────────────────
 function updateChunkBanner() {
   const banner = document.getElementById('chunk-banner');
   if (!allSupplyRows || allSupplyRows.length === 0 || currentSide !== 'supply') {
     banner.classList.remove('show'); return;
   }
-  const isFiltered  = !!window._filteredAll;
-  const dataset     = isFiltered ? window._filteredAll : allSupplyRows;
-  const chunkIdx    = isFiltered ? filteredChunkIdx : supplyChunkIdx;
-  const total       = dataset.length;
-  const totalChunks = Math.ceil(total / CHUNK_SIZE);
+
+  // Determine which dataset and cursor to use for the banner
+  const isFiltered   = !!window._filteredAll;
+  const dataset      = isFiltered ? window._filteredAll : allSupplyRows;
+  const chunkIdx     = isFiltered ? filteredChunkIdx : supplyChunkIdx;
+  const total        = dataset.length;
+  const totalChunks  = Math.ceil(total / CHUNK_SIZE);
+
+  // _totalMatchedRows is written by applyFilters before any windowing occurs,
+  // so it always reflects the true matched count whether or not filters are active.
+  // Falls back to allSupplyRows.length before the first filter run.
   const totalMatchingRows = (window._totalMatchedRows !== undefined)
-    ? window._totalMatchedRows : allSupplyRows.length;
-  if (totalMatchingRows <= CHUNK_SIZE) { banner.classList.remove('show'); return; }
+    ? window._totalMatchedRows
+    : allSupplyRows.length;
+  if (totalMatchingRows <= CHUNK_SIZE) {
+    banner.classList.remove('show'); return;
+  }
 
   banner.classList.add('show');
-  const segStart  = chunkIdx * CHUNK_SIZE + 1;
-  const segEnd    = Math.min((chunkIdx + 1) * CHUNK_SIZE, total);
-  const context   = isFiltered ? 'filtered results' : 'total enterprises';
+
+  const segStart = chunkIdx * CHUNK_SIZE + 1;
+  const segEnd   = Math.min((chunkIdx + 1) * CHUNK_SIZE, total);
+  const context  = isFiltered ? 'filtered results' : 'total enterprises';
+
   document.getElementById('chunk-info-text').textContent =
     `Viewing records ${segStart.toLocaleString()}–${segEnd.toLocaleString()} of ${total.toLocaleString()} ${context}  ·  Segment ${chunkIdx + 1} of ${totalChunks}`;
 
   const prevBtn = document.getElementById('load-prev-btn');
   const nextBtn = document.getElementById('load-next-btn');
+
   prevBtn.disabled = chunkIdx === 0;
   nextBtn.disabled = chunkIdx >= totalChunks - 1;
+
   prevBtn.textContent = chunkIdx > 0
     ? `← Records ${((chunkIdx - 1) * CHUNK_SIZE + 1).toLocaleString()}–${(chunkIdx * CHUNK_SIZE).toLocaleString()}`
     : '← Previous Segment';
@@ -697,7 +616,8 @@ function showStatePrompt(show) {
   const tbody  = document.getElementById('table-body');
   if (show) {
     prompt.classList.add('show');
-    thead.innerHTML = ''; tbody.innerHTML = '';
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
     document.getElementById('page-info').textContent = '';
     document.getElementById('page-btns').innerHTML   = '';
   } else {
@@ -706,7 +626,7 @@ function showStatePrompt(show) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEMAND + SUPPLY MANUAL UPLOAD
+// MANUAL UPLOAD (demand + supply)
 // ─────────────────────────────────────────────────────────────────────────────
 function handleUpload(type) {
   const input = document.getElementById(`${type}-upload`);
@@ -714,6 +634,7 @@ function handleUpload(type) {
   if (!file) return;
   showLoading(`Reading ${type} file…`);
 
+  // ── SUPPLY UPLOAD ──
   if (type === 'supply') {
     const reader = new FileReader();
     reader.onload = e => {
@@ -721,20 +642,37 @@ function handleUpload(type) {
         const wb   = XLSX.read(e.target.result, { type: 'binary' });
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws).map(enrichSupplyWithCategory);
-        allSupplyRows = rows; supplyData = []; supplyChunkIdx = 0; loadedStateName = '';
+
+        // Store full dataset and reset chunks
+        allSupplyRows   = rows;
+        supplyData      = [];
+        supplyChunkIdx  = 0;
+        loadedStateName = '';   // uploaded file overrides any GitHub-fetched state
+
+        // Reset state dropdown to neutral (uploaded file may cover any state)
         const sSel = document.getElementById('s-state');
-        sSel.value = ''; sSel.classList.add('mandatory-empty'); sSel.classList.remove('mandatory');
+        sSel.value = '';
+        sSel.classList.add('mandatory-empty');
+        sSel.classList.remove('mandatory');
         ['s-search','s-district','s-category','s-niccode'].forEach(id =>
           document.getElementById(id).style.display = 'none');
-        loadNextChunk(true);
+
+        // Load first chunk
+        loadNextChunk(/* silent */ true);
+
         document.getElementById('supply-file-badge').style.display = 'flex';
-        showStatePrompt(false); updateChunkBanner(); applyFilters(); updateLastUpdated(); hideLoading();
+        showStatePrompt(false);
+        updateChunkBanner();
+        applyFilters();
+        updateLastUpdated();
+        hideLoading();
       } catch (err) { alert(`Error reading supply file: ${err.message}`); hideLoading(); }
     };
     reader.readAsBinaryString(file);
     return;
   }
 
+  // ── DEMAND / TRENDS UPLOAD ──
   if (file.name.endsWith('.json')) {
     const reader = new FileReader();
     reader.onload = e => {
@@ -776,240 +714,6 @@ function enrichSupplyWithCategory(row) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// REVIEW TAB — UPLOAD
-// ─────────────────────────────────────────────────────────────────────────────
-function handleReviewUpload() {
-  // Accept input from either the hero upload or the toolbar replace button
-  const heroInput    = document.getElementById('review-upload-input');
-  const replaceInput = document.getElementById('review-replace-input');
-  const file         = (heroInput.files[0]) || (replaceInput.files[0]);
-  if (!file) return;
-
-  showLoading('Reading suggestions file…');
-
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const wb     = XLSX.read(e.target.result, { type: 'binary' });
-      // Try the named sheet first, fall back to first sheet
-      const sheetName = wb.SheetNames.includes('Product Suggestions')
-        ? 'Product Suggestions' : wb.SheetNames[0];
-      const ws     = wb.Sheets[sheetName];
-      const raw    = XLSX.utils.sheet_to_json(ws, { defval: '' });
-
-      if (!raw.length) throw new Error('No rows found in the file.');
-
-      // Capture original column order from the sheet header
-      const range  = XLSX.utils.decode_range(ws['!ref']);
-      reviewColOrder = [];
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        const cell = ws[XLSX.utils.encode_cell({ r: range.s.r, c })];
-        if (cell && cell.v != null) reviewColOrder.push(String(cell.v));
-      }
-
-      // Attach internal tracking fields
-      reviewRows = raw.map((row, i) => ({
-        ...row,
-        _id:      i,
-        _deleted: false,
-      }));
-
-      // Reset filters
-      document.getElementById('rv-cat-filter').innerHTML = '<option value="">All Categories</option>';
-      const cats = [...new Set(reviewRows.map(r => r['Category']).filter(Boolean))].sort();
-      cats.forEach(c => {
-        const o = document.createElement('option'); o.value = o.textContent = c;
-        document.getElementById('rv-cat-filter').appendChild(o);
-      });
-
-      document.getElementById('review-hero').style.display        = 'none';
-      document.getElementById('review-table-wrap').classList.add('show');
-
-      updateReviewStats();
-      renderReviewTable();
-      hideLoading();
-
-      // Clear file inputs so the same file can be re-uploaded after edits
-      heroInput.value    = '';
-      replaceInput.value = '';
-
-    } catch (err) { alert(`Error reading suggestions file:\n${err.message}`); hideLoading(); }
-  };
-  reader.readAsBinaryString(file);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REVIEW TAB — RENDER TABLE
-// ─────────────────────────────────────────────────────────────────────────────
-function renderReviewTable() {
-  const catFilter    = document.getElementById('rv-cat-filter').value;
-  const statusFilter = document.getElementById('rv-status-filter').value;
-
-  const visible = reviewRows.filter(r => {
-    if (r._deleted) return false;
-    if (catFilter && r['Category'] !== catFilter) return false;
-    const filled = String(r['Search Term'] || '').trim() !== '';
-    if (statusFilter === 'approved' && !filled)  return false;
-    if (statusFilter === 'pending'  &&  filled)  return false;
-    return true;
-  });
-
-  const thead = document.getElementById('rv-head');
-  const tbody = document.getElementById('rv-body');
-
-  // Columns to show (hide State_Allocation_JSON — machine use only)
-  const displayCols = reviewColOrder.filter(c => c !== 'State_Allocation_JSON');
-
-  thead.innerHTML = '<tr>' +
-    '<th style="width:36px;"></th>' +
-    '<th style="width:90px;">Status</th>' +
-    displayCols.map(c =>
-      `<th style="${c === 'Search Term' ? 'background:#1A56B8;color:#fff;' : ''}">${c}</th>`
-    ).join('') +
-    '</tr>';
-
-  if (!visible.length) {
-    tbody.innerHTML = `<tr><td colspan="${displayCols.length + 2}">
-      <div class="review-empty"><div class="review-empty-icon">🔍</div>
-      ${reviewRows.filter(r => !r._deleted).length === 0
-        ? 'All rows have been deleted.'
-        : 'No rows match the current filters.'}
-      </div></td></tr>`;
-    updateReviewBottomBar(visible.length);
-    return;
-  }
-
-  tbody.innerHTML = visible.map(row => {
-    const filled  = String(row['Search Term'] || '').trim() !== '';
-    const badge   = filled
-      ? `<span class="badge-approved">✅ Approved</span>`
-      : `<span class="badge-pending">⏳ Pending</span>`;
-    const cells   = displayCols.map(col => {
-      if (col === 'Search Term') {
-        const val = escHtml(String(row[col] || ''));
-        return `<td><input class="search-term-input ${val ? 'filled' : ''}" type="text"
-          value="${val}" placeholder="Enter search term…"
-          oninput="updateSearchTerm(${row._id}, this.value)"
-          onchange="updateSearchTerm(${row._id}, this.value)"></td>`;
-      }
-      // Truncate very long values (e.g. State_Allocation_JSON if somehow present)
-      let v = String(row[col] ?? '');
-      if (v.length > 120) v = v.slice(0, 117) + '…';
-      return `<td class="${['Product','States'].includes(col) ? 'wrap' : ''}">${escHtml(v)}</td>`;
-    }).join('');
-    return `<tr>
-      <td><button class="del-btn" onclick="deleteReviewRow(${row._id})" title="Remove this row">×</button></td>
-      <td>${badge}</td>
-      ${cells}
-    </tr>`;
-  }).join('');
-
-  updateReviewBottomBar(visible.length);
-}
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function updateSearchTerm(id, value) {
-  const row = reviewRows.find(r => r._id === id);
-  if (!row) return;
-  row['Search Term'] = value;
-  // Update the input style in place without re-rendering
-  const input = document.querySelector(`input[oninput*="updateSearchTerm(${id},"]`);
-  if (input) input.classList.toggle('filled', value.trim() !== '');
-  updateReviewStats();
-}
-
-function deleteReviewRow(id) {
-  const row = reviewRows.find(r => r._id === id);
-  if (row) row._deleted = true;
-  renderReviewTable();
-  updateReviewStats();
-}
-
-function reviewDeletePending() {
-  const pending = reviewRows.filter(r => !r._deleted && String(r['Search Term']||'').trim() === '');
-  if (!pending.length) { alert('No pending rows to remove.'); return; }
-  if (!confirm(`Remove ${pending.length} pending (unfilled) rows?`)) return;
-  pending.forEach(r => r._deleted = true);
-  renderReviewTable();
-  updateReviewStats();
-}
-
-function updateReviewStats() {
-  const active   = reviewRows.filter(r => !r._deleted);
-  const approved = active.filter(r => String(r['Search Term']||'').trim() !== '');
-  const pending  = active.length - approved.length;
-
-  // Estimate total state rows from the States_Count column
-  const totalStates = approved.reduce((acc, r) => {
-    const sc = parseInt(r['States_Count'] || r['States Count'] || '0', 10);
-    return acc + (isNaN(sc) ? 0 : sc);
-  }, 0);
-
-  document.getElementById('rv-total').textContent    = active.length;
-  document.getElementById('rv-approved').textContent = approved.length;
-  document.getElementById('rv-pending').textContent  = pending;
-  document.getElementById('rv-states').textContent   = totalStates.toLocaleString();
-}
-
-function updateReviewBottomBar(visibleCount) {
-  const active   = reviewRows.filter(r => !r._deleted);
-  const approved = active.filter(r => String(r['Search Term']||'').trim() !== '');
-  document.getElementById('rv-bottom-info').textContent =
-    `Showing ${visibleCount} of ${active.length} rows  ·  ${approved.length} approved`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REVIEW TAB — DOWNLOAD
-// ─────────────────────────────────────────────────────────────────────────────
-function downloadReviewedXlsx() {
-  const active = reviewRows.filter(r => !r._deleted);
-  if (!active.length) { alert('No rows to download — all rows have been deleted.'); return; }
-
-  try {
-    showLoading('Building reviewed XLSX…');
-
-    // Strip internal tracking fields, keep original col order
-    const outRows = active.map(r => {
-      const out = {};
-      reviewColOrder.forEach(col => { out[col] = r[col] ?? ''; });
-      return out;
-    });
-
-    const ws  = XLSX.utils.json_to_sheet(outRows, { header: reviewColOrder });
-    const wb  = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Product Suggestions');
-
-    // Highlight Search Term column (col D assumed — position 3, 0-indexed)
-    const stIdx = reviewColOrder.indexOf('Search Term');
-    if (stIdx >= 0) {
-      const colLetter = XLSX.utils.encode_col(stIdx);
-      const range     = XLSX.utils.decode_range(ws['!ref']);
-      for (let r = 0; r <= range.e.r; r++) {
-        const addr = XLSX.utils.encode_cell({ r, c: stIdx });
-        if (!ws[addr]) ws[addr] = { t: 's', v: '' };
-        ws[addr].s = r === 0
-          ? { fill: { fgColor: { rgb: '1A56B8' } }, font: { color: { rgb: 'FFFFFF' }, bold: true } }
-          : { fill: { fgColor: { rgb: 'EBF2FF' } } };
-      }
-    }
-
-    const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    XLSX.writeFile(wb, `new_products_suggestions_reviewed_${ts}.xlsx`);
-    hideLoading();
-  } catch (err) {
-    alert(`Error: ${err.message}`);
-    hideLoading();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // SWITCH SIDE
 // ─────────────────────────────────────────────────────────────────────────────
 function switchSide(side) {
@@ -1019,42 +723,27 @@ function switchSide(side) {
 
   document.getElementById('btn-demand').classList.toggle('active', side === 'demand');
   document.getElementById('btn-supply').classList.toggle('active', side === 'supply');
-  document.getElementById('btn-review').classList.toggle('active', side === 'review');
+  document.getElementById('demand-filters').style.display = side === 'demand' ? 'flex' : 'none';
+  document.getElementById('supply-filters').style.display = side === 'supply' ? 'flex' : 'none';
 
-  // Show/hide the correct panels
-  const isReview = side === 'review';
-  document.getElementById('ctrlbar').style.display        = isReview ? 'none' : '';
-  document.getElementById('chunk-banner').style.display   = isReview ? 'none' : '';
-  document.getElementById('stats-row').style.display      = isReview ? 'none' : '';
-  document.getElementById('main-table-wrap').style.display = isReview ? 'none' : '';
-  document.getElementById('review-panel').classList.toggle('show', isReview);
-
-  // Download button — switch label
-  document.getElementById('download-btn').style.display = isReview ? 'none' : '';
-
-  if (side === 'demand') {
-    document.getElementById('demand-filters').style.display = 'flex';
-    document.getElementById('supply-filters').style.display = 'none';
-    document.getElementById('upload-strip').style.display   = '';
-  } else if (side === 'supply') {
-    document.getElementById('demand-filters').style.display = 'none';
-    document.getElementById('supply-filters').style.display = 'flex';
-    document.getElementById('upload-strip').style.display   = '';
+  if (side === 'supply') {
     const stateVal    = document.getElementById('s-state').value;
     const hasUploaded = document.getElementById('supply-file-badge').style.display !== 'none';
-    if (!stateVal && !hasUploaded) { showStatePrompt(true); updateChunkBanner(); updateStats(); return; }
+    if (!stateVal && !hasUploaded) {
+      showStatePrompt(true);
+      updateChunkBanner();
+      updateStats();
+      return;
+    }
   }
 
-  if (!isReview) { showStatePrompt(false); updateChunkBanner(); applyFilters(); }
-}
-
-function handleDownload() {
-  if (currentSide === 'review') return;
-  downloadFiltered();
+  showStatePrompt(false);
+  updateChunkBanner();
+  applyFilters();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FILTERS (demand + supply)
+// FILTERS
 // ─────────────────────────────────────────────────────────────────────────────
 function applyFilters() {
   const all  = currentSide === 'demand' ? demandData : supplyData;
@@ -1077,15 +766,20 @@ function applyFilters() {
     if (peak)     data = data.filter(r => getPeakMonths(r).includes(peak));
 
   } else {
-    const stateVal    = document.getElementById('s-state').value;
-    const hasUploaded = document.getElementById('supply-file-badge').style.display !== 'none';
+    const stateVal     = document.getElementById('s-state').value;
+    const hasUploaded  = document.getElementById('supply-file-badge').style.display !== 'none';
     if (!stateVal && !hasUploaded) { filteredData = []; renderTable(); updateStats(); return; }
 
     const search   = document.getElementById('s-search').value.toLowerCase();
     const district = document.getElementById('s-district').value;
     const category = document.getElementById('s-category').value;
     const niccode  = document.getElementById('s-niccode').value;
+
     const hasSubFilter = search || district || category || niccode;
+
+    // When a sub-filter is active, query the full dataset so results aren't
+    // limited to whichever segment is currently in the raw window.
+    // When unfiltered, respect the raw segment window for performance.
     const sourceRows = (hasSubFilter && allSupplyRows) ? allSupplyRows : supplyData;
     data = [...sourceRows];
 
@@ -1097,8 +791,12 @@ function applyFilters() {
     if (category) data = data.filter(r => r['Category'] === category);
     if (niccode)  data = data.filter(r => String(r['NIC_Code']) === niccode);
 
+    // True total: when no sub-filter is active the source was just one segment,
+    // so use allSupplyRows.length for the real file total. When filters are active
+    // data was built from allSupplyRows so data.length is the true matched count.
     window._totalMatchedRows = hasSubFilter ? data.length : (allSupplyRows ? allSupplyRows.length : data.length);
 
+    // If filtered results still exceed CHUNK_SIZE, apply a filtered segment window.
     if (hasSubFilter && data.length > CHUNK_SIZE) {
       window._filteredAll = data;
       const fStart = filteredChunkIdx * CHUNK_SIZE;
@@ -1117,10 +815,15 @@ function applyFilters() {
     });
   }
 
-  filteredData = data; currentPage = 1;
+  filteredData = data;
+  currentPage  = 1;
+  // Reset filtered segment to first page whenever filters are re-applied
+  // (navigateFilteredChunk sets it explicitly when navigating)
   if (!window._navigatingFilteredChunk) filteredChunkIdx = 0;
   window._navigatingFilteredChunk = false;
-  renderTable(); updateStats(); buildFilterOptions();
+  renderTable();
+  updateStats();
+  buildFilterOptions();
   if (currentSide === 'supply') updateChunkBanner();
 }
 
@@ -1131,10 +834,10 @@ function buildFilterOptions() {
   const all = currentSide === 'demand' ? demandData : supplyData;
 
   if (currentSide === 'demand') {
-    const state = document.getElementById('d-state').value;
+    const state    = document.getElementById('d-state').value;
     const category = document.getElementById('d-category').value;
-    const trend = document.getElementById('d-trend').value;
-    const peak  = document.getElementById('d-peakmonth').value;
+    const trend    = document.getElementById('d-trend').value;
+    const peak     = document.getElementById('d-peakmonth').value;
 
     fillSelect('d-state',    [...new Set(all.map(r => r['State']).filter(Boolean))].sort(), state);
     const afterState = state ? all.filter(r => r['State'] === state) : all;
@@ -1143,10 +846,14 @@ function buildFilterOptions() {
     const afterTrend = trend    ? afterCat.filter(r => (r['Trend_Direction']||'').includes(trend)) : afterCat;
     const peakSet    = new Set(afterTrend.flatMap(r => getPeakMonths(r)));
     fillSelect('d-peakmonth', MONTH_NAMES.filter(m => peakSet.has(m)), peak);
+
   } else {
     const hasUploaded = document.getElementById('supply-file-badge').style.display !== 'none';
     if (!document.getElementById('s-state').value && !hasUploaded) return;
+
+    // Always build dropdown options from the full dataset, not the current window
     const fullRows = allSupplyRows || supplyData;
+
     const district = document.getElementById('s-district').value;
     const category = document.getElementById('s-category').value;
     const niccode  = document.getElementById('s-niccode').value;
@@ -1189,13 +896,14 @@ const SUPPLY_COLS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RENDER (demand + supply)
+// RENDER
 // ─────────────────────────────────────────────────────────────────────────────
 function renderTable() {
   const cols  = currentSide === 'demand' ? DEMAND_COLS : SUPPLY_COLS;
   const thead = document.getElementById('table-head');
   const tbody = document.getElementById('table-body');
 
+  // Don't render table when state prompt is showing (no state selected AND no file uploaded)
   const hasUploadedSupply = document.getElementById('supply-file-badge').style.display !== 'none';
   if (currentSide === 'supply' && !document.getElementById('s-state').value && !hasUploadedSupply) return;
 
@@ -1294,11 +1002,11 @@ function updateStats() {
     document.getElementById('stat-extra3').textContent       = new Set(filteredData.map(r => r['State']).filter(Boolean)).size.toLocaleString();
     document.getElementById('stat-extra3-lbl').textContent   = 'States Represented';
   } else {
-    const fileTotal     = allSupplyRows ? allSupplyRows.length : 0;
-    const totalChunks   = allSupplyRows ? Math.ceil(fileTotal / CHUNK_SIZE) : 0;
-    const needsChunking = fileTotal > CHUNK_SIZE;
-    const segLabel      = needsChunking ? `Segment ${supplyChunkIdx + 1} of ${totalChunks}` : '—';
-    const segLblText    = needsChunking ? 'Current Segment' : 'Segment';
+    const fileTotal      = allSupplyRows ? allSupplyRows.length : 0;
+    const totalChunks    = allSupplyRows ? Math.ceil(fileTotal / CHUNK_SIZE) : 0;
+    const needsChunking  = fileTotal > CHUNK_SIZE;
+    const segLabel       = needsChunking ? `Segment ${supplyChunkIdx + 1} of ${totalChunks}` : '—';
+    const segLblText     = needsChunking ? 'Current Segment' : 'Segment';
 
     document.getElementById('stat-total').textContent        = fileTotal.toLocaleString();
     document.getElementById('stat-total-lbl').textContent    = 'Total Enterprises';
@@ -1324,7 +1032,7 @@ function normaliseMonthName(val) {
     const idx = parseInt(s.split('-')[1], 10) - 1;
     return MONTH_NAMES[idx] || null;
   }
-  const cap = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  const cap  = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
   if (MONTH_NAMES.includes(cap)) return cap;
   return MONTH_NAMES.find(m => m.toLowerCase().startsWith(s.toLowerCase().slice(0, 3))) || null;
 }
@@ -1347,7 +1055,7 @@ function getPeakMonths(row) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DOWNLOAD (demand + supply)
+// DOWNLOAD
 // ─────────────────────────────────────────────────────────────────────────────
 function downloadFiltered() {
   if (filteredData.length === 0) { alert('No data to download.'); return; }
@@ -1369,22 +1077,33 @@ function refreshData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
 
+  // Reset demand
   setDemandData([]);
   document.getElementById('trends-file-badge').style.display = 'none';
   document.getElementById('supply-file-badge').style.display = 'none';
 
-  supplyData = []; allSupplyRows = null; supplyChunkIdx = 0;
-  filteredChunkIdx = 0; window._filteredAll = null;
-  window._totalMatchedRows = undefined; loadedStateName = '';
-  filteredData = [];
+  // Reset supply
+  supplyData       = [];
+  allSupplyRows    = null;
+  supplyChunkIdx   = 0;
+  filteredChunkIdx = 0;
+  window._filteredAll = null;
+  window._totalMatchedRows = undefined;
+  loadedStateName  = '';
+  filteredData     = [];
 
+  // Reset supply state dropdown
   const sSel = document.getElementById('s-state');
-  sSel.value = ''; sSel.classList.add('mandatory-empty'); sSel.classList.remove('mandatory');
+  sSel.value = '';
+  sSel.classList.add('mandatory-empty');
+  sSel.classList.remove('mandatory');
   ['s-search','s-district','s-category','s-niccode'].forEach(id =>
     document.getElementById(id).style.display = 'none');
 
   if (currentSide === 'supply') showStatePrompt(true);
-  updateChunkBanner(); renderTable(); updateStats();
+  updateChunkBanner();
+  renderTable();
+  updateStats();
 
   autoLoadTrendsFromRepo().finally(() => btn.classList.remove('spinning'));
 }
