@@ -13,16 +13,18 @@
     "HARYANA",
     "HIMACHAL PRADESH",
     "JAMMU AND KASHMIR",
-    "JHARKHAND"
+    "JHARKHAND",
+    "KARNATAKA"
   ],
   "failed": [
-    "GUJARAT"
+    "GUJARAT",
+    "KERALA"
   ],
   "in_progress": {
-    "state": "KARNATAKA",
-    "next_offset": 2217000,
-    "xlsx_path": "data/suppliers/suppliers_Karnataka.xlsx",
-    "rows_written": 159941
+    "state": "LADAKH",
+    "next_offset": 14000,
+    "xlsx_path": "data/suppliers/suppliers_Ladakh.xlsx",
+    "rows_written": 2221
   },
   "runs_without_progress": 0
 }
