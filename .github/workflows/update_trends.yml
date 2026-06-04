@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '0 6 4 * *'
   workflow_dispatch:
+    inputs:
+      fresh_run:
+        description: 'Wipe previous progress and start fresh (true/false)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -31,6 +36,8 @@ jobs:
           BRIGHTDATA_PASSWORD: ${{ secrets.BRIGHTDATA_PASSWORD }}
           BRIGHTDATA_HOST:     ${{ secrets.BRIGHTDATA_HOST }}
           BRIGHTDATA_PORT:     ${{ secrets.BRIGHTDATA_PORT }}
+          # Scheduled runs are always fresh. Manual dispatch respects the input.
+          FRESH_RUN: ${{ github.event_name == 'schedule' && 'true' || inputs.fresh_run }}
         run: |
           cleanup() {
             echo "⚠️ Signal received — committing progress before exit..."
@@ -46,7 +53,7 @@ jobs:
 
           # Kill the scraper after 5h 45m — gives 15 min buffer before
           # GitHub's hard 6h kill, enough time for git push to complete
-          timeout 20700 python google_trends_scraper.py || true
+          timeout 20700 python google_trends_scraper.py --fresh "$FRESH_RUN" || true
 
   retrigger:
     runs-on: ubuntu-latest
@@ -113,8 +120,9 @@ jobs:
           if [ -f RETRIGGER ]; then
             echo "⏳ Waiting 20 minutes before next run..."
             sleep 1200
-            echo "🔁 Triggering next run..."
-            gh workflow run update_trends.yml
+            echo "🔁 Triggering next run (resume — no fresh wipe)..."
+            # Retrigger always passes fresh_run=false so progress is preserved
+            gh workflow run update_trends.yml -f fresh_run=false
           else
             echo "🎉 All done! No further runs needed."
           fi
