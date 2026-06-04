@@ -118,11 +118,13 @@ jobs:
       #   3 — stall limit hit             → incomplete=stop   (no retrigger)
       #   other — unexpected error        → incomplete=true   (commit still runs)
       #
-      # Output format: xlsx per state (FIX 14).
-      # Ephemeral CSVs are written to disk during pagination and converted
-      # to xlsx on state completion or on deadline (FIX 16). On the next
-      # run the script resumes the interrupted state from the saved offset
-      # using the committed partial xlsx — it does NOT restart from 0.
+      # Output format: one xlsx per state (FIX 14). Matching rows are
+      # accumulated in memory throughout pagination and written to xlsx in
+      # a single atomic operation at state completion or deadline (FIX 28,
+      # FIX 29). No CSV is ever written to disk.
+      # On deadline a partial xlsx is written and pushed so the next run
+      # can resume from the saved offset (FIX 16, FIX 30). The script
+      # does NOT restart from offset 0 on resume.
       # Each completed or partial xlsx is committed and pushed immediately
       # by the script (FIX 15), so data is safe even if the job times out
       # before reaching the commit step below.
@@ -159,9 +161,9 @@ jobs:
       #
       # The glob `data/suppliers/suppliers_*.xlsx` intentionally does NOT
       # match _tmp.xlsx or _dedup_tmp.xlsx files (FIX 27) — those are
-      # ephemeral and must never be committed. The script's finally blocks
-      # (FIX 25, FIX 26) ensure tmp files are cleaned up before this step
-      # runs, but the glob provides a second layer of protection.
+      # ephemeral write-time temporaries that must never be committed. The
+      # script's finally blocks (FIX 25, FIX 29) ensure tmp files are
+      # cleaned up before this step runs, but the glob is a second safeguard.
       #
       # Sets data_pushed=true on success (or when there is nothing to push),
       # and data_pushed=false if the push fails after all retries. The
@@ -169,9 +171,7 @@ jobs:
       # preventing run 2 from starting against a repo missing run 1's data.
       #
       # FIX 22: git clean uses --exclude so completed xlsx files and the
-      # checkpoint are not deleted before the pull --rebase. Ephemeral
-      # _partial_*.csv files are intentionally NOT excluded — they are
-      # never committed and their removal by git clean is correct.
+      # checkpoint are not deleted before the pull --rebase.
       # FIX 23: git checkout -- . runs before every git clean + pull
       # --rebase (including inside the retry loop) so tracked-file
       # modifications never cause the rebase to fail with exit code 128.
