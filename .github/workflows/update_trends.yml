@@ -1,7 +1,7 @@
 name: Update Google Trends Data
 on:
   schedule:
-    - cron: '0 6 4 * *'
+    - cron: '0 6 4 * *' #Runs at 11.30am IST on 4th of every month
   workflow_dispatch:
     inputs:
       fresh_run:
