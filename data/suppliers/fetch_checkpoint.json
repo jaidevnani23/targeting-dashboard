@@ -10,22 +10,17 @@
     "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
     "DELHI",
     "GOA",
+    "GUJARAT",
     "HARYANA",
     "HIMACHAL PRADESH",
     "JAMMU AND KASHMIR",
     "JHARKHAND",
     "KARNATAKA",
-    "LADAKH"
+    "KERALA",
+    "LADAKH",
+    "LAKSHADWEEP",
+    "MADHYA PRADESH"
   ],
-  "failed": [
-    "GUJARAT",
-    "KERALA"
-  ],
-  "in_progress": {
-    "state": "LAKSHADWEEP",
-    "next_offset": 2000,
-    "xlsx_path": "data/suppliers/suppliers_Lakshadweep.xlsx",
-    "rows_written": 381
-  },
+  "failed": [],
+  "in_progress": null,
   "runs_without_progress": 0
-}
