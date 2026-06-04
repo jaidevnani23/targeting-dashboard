@@ -2,7 +2,7 @@
 """
 Product Updater
 ===============
-Reads approved products from data/new_products_suggestions.json
+Reads approved products from data/new_products_suggestions.xlsx
 and appends them to data/Demand_Excel_Filled.xlsx.
 
 Unlike the old version (which added every product to all 36 states),
@@ -14,7 +14,7 @@ State allocation per product:
   - Tier 2 states (next 30%)                  → included
   - Floor guarantee                            → minimum 3 states always
 
-Run MANUALLY after reviewing new_products_suggestions.json, OR pass --yes
+Run MANUALLY after reviewing new_products_suggestions.xlsx, OR pass --yes
 to skip the confirmation prompt (used automatically by GitHub Actions CI).
 
 Usage:
@@ -36,7 +36,7 @@ import pandas as pd
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DEMAND_FILE      = "data/Demand_Excel_Filled.xlsx"
-SUGGESTIONS_FILE = "data/new_products_suggestions.json"
+SUGGESTIONS_FILE = "data/new_products_suggestions.xlsx"
 BACKUP_DIR       = "data/backups"
 
 logging.basicConfig(level=logging.INFO,
@@ -51,18 +51,35 @@ def load_suggestions() -> list:
         raise FileNotFoundError(
             f"{SUGGESTIONS_FILE} not found. Run product_discovery.py first."
         )
-    with open(SUGGESTIONS_FILE, encoding="utf-8") as f:
-        data = json.load(f)
 
-    suggestions = data.get("suggestions", [])
+    df = pd.read_excel(SUGGESTIONS_FILE, sheet_name="Product Suggestions", dtype=str)
+
+    # Normalise column names (strip whitespace)
+    df.columns = [c.strip() for c in df.columns]
+
+    suggestions = df.to_dict("records")
 
     # Only keep rows where Search Term has been filled in
-    approved = [s for s in suggestions if s.get("Search Term", "").strip()]
+    approved = [
+        s for s in suggestions
+        if str(s.get("Search Term", "")).strip() not in ("", "nan")
+    ]
     skipped  = len(suggestions) - len(approved)
 
     log.info(f"Total suggestions          : {len(suggestions)}")
     log.info(f"Approved (with Search Term): {len(approved)}")
     log.info(f"Skipped (no Search Term)   : {skipped}")
+
+    # Parse the State_Allocation_JSON column back into a list
+    for s in approved:
+        raw = str(s.get("State_Allocation_JSON", "")).strip()
+        if raw and raw != "nan":
+            try:
+                s["State_Allocation"] = json.loads(raw)
+            except json.JSONDecodeError:
+                s["State_Allocation"] = []
+        else:
+            s["State_Allocation"] = []
 
     # Warn about products with no state allocation
     no_states = [s for s in approved if not s.get("State_Allocation")]
@@ -116,10 +133,10 @@ def build_new_rows(approved: list, existing_df: pd.DataFrame) -> pd.DataFrame:
     skipped_no_states = 0
 
     for suggestion in approved:
-        product          = suggestion["Product"].strip()
-        category         = suggestion["Category"].strip()
+        product          = str(suggestion["Product"]).strip()
+        category         = str(suggestion["Category"]).strip()
         nic_code         = str(suggestion["NIC_Code"]).strip()
-        search_term      = suggestion["Search Term"].strip()
+        search_term      = str(suggestion["Search Term"]).strip()
         state_allocation = suggestion.get("State_Allocation", [])
 
         if not state_allocation:
@@ -164,7 +181,7 @@ def save_updated_excel(existing_df: pd.DataFrame, new_rows_df: pd.DataFrame):
 def archive_suggestions():
     os.makedirs(BACKUP_DIR, exist_ok=True)
     ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_path = os.path.join(BACKUP_DIR, f"suggestions_processed_{ts}.json")
+    archive_path = os.path.join(BACKUP_DIR, f"suggestions_processed_{ts}.xlsx")
     shutil.move(SUGGESTIONS_FILE, archive_path)
     log.info(f"Suggestions archived: {archive_path}")
 
@@ -178,12 +195,12 @@ def main():
     )
     args = parser.parse_args()
 
-    # Also auto-skip confirmation when running in CI (GitHub Actions sets CI=true)
     auto_confirm = args.yes or os.environ.get("CI", "").lower() == "true"
 
     log.info("=" * 60)
     log.info("Product Updater — %s", "CI Run" if auto_confirm else "Manual Run")
     log.info(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+    log.info(f"Reading: {SUGGESTIONS_FILE}")
     log.info("=" * 60)
 
     approved    = load_suggestions()
