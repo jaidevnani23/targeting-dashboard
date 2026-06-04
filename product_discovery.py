@@ -2,30 +2,27 @@
 """
 Product Discovery Script
 ========================
-Scrapes trending/bestselling products from Amazon India and Flipkart,
-compares against existing products in data/Demand_Excel_Filled.xlsx,
-reads supplier CSVs from data/suppliers/ to determine which states
-have meaningful supplier presence for each product's NIC code,
-and outputs data/new_products_suggestions.json for your review.
+Scrapes trending/bestselling products from Amazon India and Flipkart
+via BrightData Web Access API (serp_trends1), compares against existing
+products in Demand_Excel_Filled.xlsx, reads supplier xlsx files to
+determine which states have meaningful supplier presence for each
+product's NIC code, and outputs new_products_suggestions.xlsx.
 
-State allocation logic (tiered by supplier count):
-  - Tier 1 (top 20% of states by supplier count) → included
-  - Tier 2 (next 30%)                             → included
-  - Tier 3 (bottom 50%)                           → excluded
-  - Floor guarantee: minimum 3 states always included
+BrightData Web Access API:
+  - Find your API key: BrightData dashboard > Web Access > serp_trends1
+  - Paste it into BD_WEB_ACCESS_KEY below
+  - Zone name is: serp_trends1
+  - Cost: $1.50/CPM (~$0.0015 per request)
 
 After running:
-  1. Open data/new_products_suggestions.json
+  1. Open new_products_suggestions.xlsx
   2. Fill in "Search Term" for products you want to keep
   3. Delete rows you don't want
-  4. Upload back to GitHub (data/ folder)
-  5. Run product_updater.py
-
-Run schedule: Quarterly via GitHub Actions (after msme_supplier_fetcher.py).
-Can also be run manually: python product_discovery.py
+  4. Upload the file via the dashboard (Product Review tab)
+     OR run product_updater.py directly
 
 Requirements:
-    pip install requests pandas openpyxl beautifulsoup4 lxml
+    pip install requests pandas openpyxl beautifulsoup4 lxml python-dotenv
 """
 
 import requests
@@ -39,53 +36,140 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from collections import defaultdict
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
+# ── .env support ──────────────────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ── CONFIG — fill these in ────────────────────────────────────────────────────
 DEMAND_FILE    = "data/Demand_Excel_Filled.xlsx"
 NIC_CODES_FILE = "data/Key_NIC_Codes_List.xlsx"
 SUPPLIERS_DIR  = "data/suppliers"
-OUTPUT_FILE    = "data/new_products_suggestions.json"
+OUTPUT_FILE    = "data/new_products_suggestions.xlsx"
+
+# BrightData Web Access API key
+# Find in: BrightData dashboard > Web Access > serp_trends1 > API Key
+BD_WEB_ACCESS_KEY  = os.environ.get("BD_WEB_ACCESS_KEY", "7e2f85a0-e82b-420d-b5f1-fe10f1fe9774")
+BD_WEB_ACCESS_ZONE = "serp_trends1"
+BD_WEB_ACCESS_URL  = "https://api.brightdata.com/request"
+
+SKIP_AMAZON   = False
+SKIP_FLIPKART = False
 
 MAX_PER_CATEGORY = 10
-MIN_FLOOR_STATES = 3   # guarantee at least this many states per product
+MIN_FLOOR_STATES = 3
 
-# Randomized delay ranges (in seconds)
-MIN_SCRAPE_DELAY   = 4.5   # minimum delay between individual scrapes
-MAX_SCRAPE_DELAY   = 8.7   # maximum delay between individual scrapes
-MIN_CATEGORY_DELAY = 10.0  # minimum delay between categories
-MAX_CATEGORY_DELAY = 15.5  # maximum delay between categories
+MIN_SCRAPE_DELAY   = 2.0
+MAX_SCRAPE_DELAY   = 4.0
+MIN_CATEGORY_DELAY = 6.0
+MAX_CATEGORY_DELAY = 10.0
+
+MAX_RETRIES   = 3
+RETRY_BACKOFF = 10
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-7s  %(message)s",
                     datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
+# ── BRIGHTDATA WEB ACCESS API ─────────────────────────────────────────────────
+def _credentials_ok() -> bool:
+    return BD_WEB_ACCESS_KEY not in {"YOUR_API_KEY_HERE", ""}
 
-def get_headers():
-    return {
-        "User-Agent":      random.choice(USER_AGENTS),
-        "Accept-Language": "en-IN,en;q=0.9",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+def _fetch_url(url: str, site_name: str) -> str | None:
+    headers = {
+        "Content-Type":  "application/json",
+        "Authorization": f"Bearer {BD_WEB_ACCESS_KEY}",
     }
+    payload = {
+        "zone":   BD_WEB_ACCESS_ZONE,
+        "url":    url,
+        "format": "raw",
+    }
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.post(
+                BD_WEB_ACCESS_URL,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+
+            if resp.status_code == 200:
+                return resp.text
+            elif resp.status_code == 401:
+                log.error(
+                    "Web Access API returned 401 — API key is invalid or zone is disabled.\n"
+                    "  -> Check BrightData > Web Access > serp_trends1 is Active\n"
+                    "  -> Re-copy the API key into BD_WEB_ACCESS_KEY"
+                )
+                return None
+            elif resp.status_code == 429:
+                log.warning(f"  [{site_name}] Rate limited (attempt {attempt}/{MAX_RETRIES})")
+            elif resp.status_code in (503, 502):
+                log.warning(f"  [{site_name}] HTTP {resp.status_code} (attempt {attempt}/{MAX_RETRIES})")
+            else:
+                log.warning(f"  [{site_name}] HTTP {resp.status_code} — skipping")
+                return None
+
+        except Exception as e:
+            log.warning(f"  [{site_name}] Request error (attempt {attempt}/{MAX_RETRIES}): {e}")
+
+        if attempt < MAX_RETRIES:
+            log.info(f"  Backing off {RETRY_BACKOFF}s before retry...")
+            time.sleep(RETRY_BACKOFF)
+
+    log.warning(f"  [{site_name}] All {MAX_RETRIES} attempts failed — skipping keyword")
+    return None
+
+
+def scrape_amazon(search_term: str) -> list:
+    if SKIP_AMAZON:
+        return []
+    url  = f"https://www.amazon.in/s?k={requests.utils.quote(search_term)}&s=review-rank"
+    html = _fetch_url(url, "Amazon")
+    if not html:
+        return []
+    soup     = BeautifulSoup(html, "lxml")
+    products = []
+    for tag in soup.select("span.a-text-normal"):
+        text = tag.get_text(strip=True)
+        if 10 < len(text) < 120:
+            products.append(text)
+    log.info(f"  Amazon: {len(products[:15])} products for '{search_term}'")
+    return products[:15]
+
+
+def scrape_flipkart(search_term: str) -> list:
+    if SKIP_FLIPKART:
+        return []
+    url  = f"https://www.flipkart.com/search?q={requests.utils.quote(search_term)}&sort=popularity"
+    html = _fetch_url(url, "Flipkart")
+    if not html:
+        return []
+    soup     = BeautifulSoup(html, "lxml")
+    products = []
+    for selector in ["div._4rR01T", "a.s1Q9rs", "div.KzDlHZ", "div.col-7-12 a"]:
+        for tag in soup.select(selector):
+            text = tag.get_text(strip=True)
+            if 10 < len(text) < 120:
+                products.append(text)
+    log.info(f"  Flipkart: {len(products[:15])} products for '{search_term}'")
+    return products[:15]
 
 
 def random_scrape_delay():
-    """Sleep for a randomized duration between individual scrapes"""
     delay = random.uniform(MIN_SCRAPE_DELAY, MAX_SCRAPE_DELAY)
-    log.info(f"💤 Waiting {delay:.2f}s before next scrape...")
+    log.info(f"  Waiting {delay:.1f}s...")
     time.sleep(delay)
-
 
 def random_category_delay():
-    """Sleep for a randomized duration between categories"""
     delay = random.uniform(MIN_CATEGORY_DELAY, MAX_CATEGORY_DELAY)
-    log.info(f"💤 Category complete. Waiting {delay:.2f}s before next category...")
+    log.info(f"Category done. Waiting {delay:.1f}s before next...")
     time.sleep(delay)
-
 
 # ── LOAD REFERENCE DATA ───────────────────────────────────────────────────────
 def load_existing_products() -> set:
@@ -151,33 +235,27 @@ def _keywords_from_description(desc: str) -> list:
     keywords.append(desc.lower())
     return keywords
 
-
 # ── SUPPLIER STATE ANALYSIS ───────────────────────────────────────────────────
 def load_supplier_counts_by_nic() -> dict:
-    """
-    Reads all supplier CSV files from data/suppliers/ and builds:
-    {nic_code: {state: count}} — supplier count per state per NIC code.
-    """
     nic_state_counts = defaultdict(lambda: defaultdict(int))
 
     if not os.path.exists(SUPPLIERS_DIR):
-        log.warning(f"Suppliers directory not found: {SUPPLIERS_DIR}")
-        log.warning("State allocation will use floor guarantee only.")
+        log.warning(f"Suppliers directory not found: {SUPPLIERS_DIR} — state allocation skipped")
         return {}
 
-    files = [f for f in os.listdir(SUPPLIERS_DIR) if f.endswith('.csv')]
+    files = [f for f in os.listdir(SUPPLIERS_DIR) if f.endswith('.xlsx')]
     if not files:
-        log.warning("No supplier CSV files found. Run msme_supplier_fetcher.py first.")
+        log.warning("No supplier xlsx files found — state allocation skipped")
         return {}
 
     log.info(f"Reading {len(files)} supplier state files...")
     for fname in files:
         path = os.path.join(SUPPLIERS_DIR, fname)
         try:
-            df = pd.read_csv(path, dtype=str)
+            df = pd.read_excel(path, dtype=str)
             for _, record in df.iterrows():
                 nic_code = str(record.get("NIC_Code", "")).strip()
-                state    = str(record.get("State", "")).strip().title()
+                state    = str(record.get("State",    "")).strip().title()
                 if nic_code and state and nic_code != 'nan' and state != 'nan':
                     nic_state_counts[nic_code][state] += 1
         except Exception as e:
@@ -188,111 +266,37 @@ def load_supplier_counts_by_nic() -> dict:
 
 
 def get_states_for_product(nic_code: str, nic_state_counts: dict) -> list:
-    """
-    Given a NIC code, returns a tiered list of states to add the product to.
-
-    Tiering logic:
-      - Rank all states by supplier count for this NIC code
-      - Tier 1 = top 20% of states  → include
-      - Tier 2 = next 30% of states → include
-      - Tier 3 = bottom 50%         → exclude
-      - Floor: always include at least MIN_FLOOR_STATES states
-
-    Returns: list of dicts [{state, supplier_count, tier}]
-    """
     state_counts = nic_state_counts.get(nic_code, {})
-
     if not state_counts:
-        # No supplier data for this NIC code — return empty
-        # product_updater will skip this product
-        log.warning(f"No supplier data for NIC {nic_code} — product will be skipped")
         return []
 
-    # Sort states by supplier count descending
     sorted_states = sorted(state_counts.items(), key=lambda x: x[1], reverse=True)
     total_states  = len(sorted_states)
-
-    # Calculate tier cutoffs
-    tier1_cutoff = max(1, int(total_states * 0.20))
-    tier2_cutoff = max(2, int(total_states * 0.50))  # top 20% + next 30%
+    tier1_cutoff  = max(1, int(total_states * 0.20))
+    tier2_cutoff  = max(2, int(total_states * 0.50))
 
     selected = []
     for i, (state, count) in enumerate(sorted_states):
-        if i < tier1_cutoff:
-            tier = 1
-        elif i < tier2_cutoff:
-            tier = 2
-        else:
-            tier = 3  # excluded
-
+        tier = 1 if i < tier1_cutoff else (2 if i < tier2_cutoff else 3)
         if tier <= 2:
-            selected.append({
-                "state":           state,
-                "supplier_count":  count,
-                "tier":            tier,
-            })
+            selected.append({"state": state, "supplier_count": count, "tier": tier})
 
-    # Floor guarantee — always include at least MIN_FLOOR_STATES
     if len(selected) < MIN_FLOOR_STATES:
         already = {s["state"] for s in selected}
         for state, count in sorted_states:
             if len(selected) >= MIN_FLOOR_STATES:
                 break
             if state not in already:
-                selected.append({
-                    "state":          state,
-                    "supplier_count": count,
-                    "tier":           3,  # forced inclusion
-                })
+                selected.append({"state": state, "supplier_count": count, "tier": 3})
 
     return selected
-
-
-# ── SCRAPING ──────────────────────────────────────────────────────────────────
-def scrape_amazon(search_term: str) -> list:
-    url = f"https://www.amazon.in/s?k={requests.utils.quote(search_term)}&s=review-rank"
-    try:
-        resp = requests.get(url, headers=get_headers(), timeout=20)
-        if resp.status_code != 200:
-            log.warning(f"Amazon {resp.status_code} for '{search_term}'")
-            return []
-        soup     = BeautifulSoup(resp.text, "lxml")
-        products = []
-        for tag in soup.select("span.a-text-normal"):
-            text = tag.get_text(strip=True)
-            if 10 < len(text) < 120:
-                products.append(text)
-        return products[:15]
-    except Exception as e:
-        log.warning(f"Amazon error for '{search_term}': {e}")
-        return []
-
-
-def scrape_flipkart(search_term: str) -> list:
-    url = f"https://www.flipkart.com/search?q={requests.utils.quote(search_term)}&sort=popularity"
-    try:
-        resp = requests.get(url, headers=get_headers(), timeout=20)
-        if resp.status_code != 200:
-            log.warning(f"Flipkart {resp.status_code} for '{search_term}'")
-            return []
-        soup     = BeautifulSoup(resp.text, "lxml")
-        products = []
-        for tag in soup.select("div._4rR01T, a.s1Q9rs, div.KzDlHZ"):
-            text = tag.get_text(strip=True)
-            if 10 < len(text) < 120:
-                products.append(text)
-        return products[:15]
-    except Exception as e:
-        log.warning(f"Flipkart error for '{search_term}': {e}")
-        return []
-
 
 # ── DISCOVERY ─────────────────────────────────────────────────────────────────
 def discover_new_products(cat_data: dict, existing: set,
                           nic_state_counts: dict, cat_lookup: dict) -> list:
-    suggestions = []
+    suggestions      = []
     total_categories = len(cat_data)
-    category_num = 0
+    category_num     = 0
 
     for category, data in cat_data.items():
         category_num += 1
@@ -302,12 +306,13 @@ def discover_new_products(cat_data: dict, existing: set,
         found = []
 
         for keyword in keywords:
-            log.info(f"  '{keyword}'")
+            log.info(f"  Keyword: '{keyword}'")
+
             amazon_products   = scrape_amazon(keyword)
-            random_scrape_delay()  # Randomized delay after Amazon scrape
+            random_scrape_delay()
 
             flipkart_products = scrape_flipkart(keyword)
-            random_scrape_delay()  # Randomized delay after Flipkart scrape
+            random_scrape_delay()
 
             for product in amazon_products + flipkart_products:
                 p_lower = product.lower().strip()
@@ -316,80 +321,158 @@ def discover_new_products(cat_data: dict, existing: set,
                 if any(s["Product"].lower() == p_lower for s in found):
                     continue
 
-                # Use the primary NIC code for this category
-                nic_code = nic_codes[0]
-
-                # Get tiered state allocation for this NIC code
+                nic_code         = nic_codes[0]
                 state_allocation = get_states_for_product(nic_code, nic_state_counts)
 
                 found.append({
-                    "Product":          product,
-                    "Category":         category,
-                    "NIC_Code":         nic_code,
-                    "Search Term":      "",   # ← you fill this in
-                    "Source":           "Amazon" if product in amazon_products else "Flipkart",
-                    "Keyword Used":     keyword,
-                    "State_Allocation": state_allocation,
-                    "States_Count":     len(state_allocation),
+                    "Product":              product,
+                    "Category":             category,
+                    "NIC_Code":             nic_code,
+                    "Search Term":          "",          # ← user fills this in
+                    "Source":               "Amazon" if product in amazon_products else "Flipkart",
+                    "Keyword Used":         keyword,
+                    "States":               " | ".join(s["state"] for s in state_allocation),
+                    "States_Count":         len(state_allocation),
+                    # Keep full allocation as JSON string for product_updater.py
+                    "State_Allocation_JSON": json.dumps(state_allocation),
                 })
 
         suggestions.extend(found[:MAX_PER_CATEGORY])
         log.info(f"  Found {len(found)} new products for {category}")
 
-        # Add delay between categories (except after the last one)
         if category_num < total_categories:
             random_category_delay()
 
     return suggestions
+
+# ── WRITE XLSX ────────────────────────────────────────────────────────────────
+def write_xlsx(suggestions: list):
+    """
+    Writes suggestions to an XLSX file.
+    Columns visible to the reviewer:
+        Product | Category | NIC_Code | Search Term | Source |
+        Keyword Used | States | States_Count
+    State_Allocation_JSON is written to a hidden-ish last column so
+    product_updater.py can reconstruct the full state list without
+    needing to re-run discovery.
+    """
+    if not suggestions:
+        log.warning("No suggestions to write.")
+        return
+
+    # Column order — Search Term is col D so it's easy to fill
+    col_order = [
+        "Product",
+        "Category",
+        "NIC_Code",
+        "Search Term",
+        "Source",
+        "Keyword Used",
+        "States",
+        "States_Count",
+        "State_Allocation_JSON",   # kept for updater; reviewer can ignore
+    ]
+
+    df = pd.DataFrame(suggestions)[col_order]
+
+    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Product Suggestions")
+
+        ws = writer.sheets["Product Suggestions"]
+
+        # ── Column widths ──────────────────────────────────────────────────
+        widths = {
+            "A": 50,  # Product
+            "B": 30,  # Category
+            "C": 12,  # NIC_Code
+            "D": 35,  # Search Term  ← highlighted
+            "E": 12,  # Source
+            "F": 30,  # Keyword Used
+            "G": 60,  # States
+            "H": 14,  # States_Count
+            "I": 20,  # State_Allocation_JSON (narrow — machine use only)
+        }
+        for col_letter, width in widths.items():
+            ws.column_dimensions[col_letter].width = width
+
+        # ── Highlight "Search Term" header and cells ───────────────────────
+        from openpyxl.styles import PatternFill, Font, Alignment
+        highlight_fill   = PatternFill("solid", fgColor="FFF3CD")   # amber tint
+        header_fill      = PatternFill("solid", fgColor="0D2240")   # navy
+        header_font      = Font(color="FFFFFF", bold=True)
+        search_hdr_fill  = PatternFill("solid", fgColor="1A56B8")   # blue
+        search_cell_fill = PatternFill("solid", fgColor="EBF2FF")   # light blue
+
+        # Style all header cells
+        for cell in ws[1]:
+            cell.fill      = header_fill
+            cell.font      = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Search Term header gets its own colour
+        ws["D1"].fill = search_hdr_fill
+
+        # Highlight all Search Term cells so reviewer knows where to type
+        for row_idx in range(2, len(suggestions) + 2):
+            ws[f"D{row_idx}"].fill      = search_cell_fill
+            ws[f"D{row_idx}"].alignment = Alignment(horizontal="left")
+
+        # Freeze top row
+        ws.freeze_panes = "A2"
+
+    log.info(f"Saved {len(suggestions)} suggestions → {OUTPUT_FILE}")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
     log.info("Product Discovery — Quarterly Run")
-    log.info(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+    log.info(f"Date      : {datetime.now().strftime('%Y-%m-%d')}")
+    log.info(f"Output    : XLSX (new_products_suggestions.xlsx)")
+    log.info(f"Sources   : {'Flipkart only' if SKIP_AMAZON else 'Amazon India + Flipkart'}"
+             + " via BrightData Web Access API")
     log.info("=" * 60)
+
+    if not _credentials_ok():
+        log.error(
+            "BD_WEB_ACCESS_KEY not set.\n"
+            "  1. Go to BrightData dashboard > Web Access > serp_trends1\n"
+            "  2. Make sure the zone is Active (toggle top right)\n"
+            "  3. Copy the API Key and paste into BD_WEB_ACCESS_KEY above"
+        )
+        return
 
     existing               = load_existing_products()
     nic_lookup, cat_lookup = load_nic_reference()
     cat_data               = load_categories_and_keywords(nic_lookup, cat_lookup)
     nic_state_counts       = load_supplier_counts_by_nic()
 
-    log.info(f"Existing products : {len(existing)}")
-    log.info(f"Categories        : {len(cat_data)}")
-    log.info(f"NIC codes with supplier data: {len(nic_state_counts)}")
+    log.info(f"Existing products           : {len(existing)}")
+    log.info(f"Categories                  : {len(cat_data)}")
+    log.info(f"NIC codes with supplier data: {len(nic_state_counts)}"
+             + (" (run msme_supplier_fetcher.py to populate)" if not nic_state_counts else ""))
 
     suggestions = discover_new_products(cat_data, existing, nic_state_counts, cat_lookup)
 
-    # Summary stats
-    total_rows = sum(s["States_Count"] for s in suggestions)
+    write_xlsx(suggestions)
 
-    os.makedirs("data", exist_ok=True)
-    output = {
-        "generated_date": datetime.now().strftime("%Y-%m-%d"),
-        "instructions": (
-            "Each suggestion includes a State_Allocation list showing which states "
-            "have meaningful supplier presence for this product's NIC code (tiered by count). "
-            "1. Fill in 'Search Term' for products you want to keep. "
-            "2. Delete rows you don't want. "
-            "3. Upload back to GitHub (data/ folder). "
-            "4. Run product_updater.py — it will add one row per allocated state."
-        ),
-        "total_suggestions": len(suggestions),
-        "total_rows_if_all_approved": total_rows,
-        "suggestions": suggestions,
-    }
-
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+    total_rows = sum(
+        len(json.loads(s["State_Allocation_JSON"])) for s in suggestions
+        if s.get("State_Allocation_JSON")
+    )
 
     log.info("\n" + "=" * 60)
     log.info(f"Total suggestions          : {len(suggestions)}")
     log.info(f"Total rows if all approved : {total_rows}")
     log.info(f"Avg states per product     : {total_rows // max(len(suggestions), 1)}")
     log.info(f"Saved to                   : {OUTPUT_FILE}")
-    log.info("Next: fill in Search Terms, delete unwanted rows,")
-    log.info("      upload back to GitHub, then run product_updater.py")
+    log.info("")
+    log.info("Next steps:")
+    log.info("  1. Open new_products_suggestions.xlsx")
+    log.info("  2. Fill in column D 'Search Term' for products you want")
+    log.info("  3. Delete any rows you don't want")
+    log.info("  4. Upload the file via the dashboard (Product Review tab)")
+    log.info("     OR run product_updater.py directly")
     log.info("=" * 60)
 
 
