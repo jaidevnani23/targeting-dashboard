@@ -2,7 +2,7 @@ name: Update Suppliers
 
 on:
   schedule:
-    - cron: '0 0 1 1,4,7,10 *'
+    - cron: '0 0 1 1,4,7,10 *' #Runs at 5.30am IST on 1st of Jan,Apr,Jul and Oct
   workflow_dispatch:
     inputs:
       reset:
