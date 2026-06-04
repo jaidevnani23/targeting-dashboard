@@ -3,8 +3,13 @@
 Google Trends Scraper → Dashboard Automation
 Scrapes Google Trends data and automatically generates dashboard-ready JSON.
 Supports resume — partial progress is saved after every product.
+
+Usage:
+  python google_trends_scraper.py            # resume / normal run
+  python google_trends_scraper.py --fresh true  # wipe progress and start fresh
 """
 
+import argparse
 import time
 import random
 import pandas as pd
@@ -13,6 +18,13 @@ import os
 from datetime import datetime, timedelta
 import openpyxl
 from pathlib import Path
+
+# ── CLI ARGS ──────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument('--fresh', default='false',
+                    help='Set to "true" to wipe previous progress and start fresh')
+args = parser.parse_args()
+FRESH_RUN = args.fresh.lower() == 'true'
 
 # ── URLLIB3 COMPATIBILITY PATCH ───────────────────────────────────────────────
 import urllib3
@@ -61,6 +73,42 @@ MONTH_TO_INDEX = {
     'January': 0, 'February': 1, 'March': 2, 'April': 3,
     'May': 4, 'June': 5, 'July': 6, 'August': 7,
     'September': 8, 'October': 9, 'November': 10, 'December': 11
+}
+
+# ── NIC CODE → CATEGORY MAPPING ───────────────────────────────────────────────
+NIC_CATEGORY_MAP = {
+    '13911': 'Textile & Fabric Manufacturing',
+    '13912': 'Textile & Fabric Manufacturing',
+    '13913': 'Textile & Fabric Manufacturing',
+    '14103': 'Apparel & Knitwear Manufacturing',
+    '14109': 'Apparel & Knitwear Manufacturing',
+    '14202': 'Home & Furnishings Retail',
+    '14301': 'Apparel & Knitwear Manufacturing',
+    '15122': 'Leather Goods Manufacturing',
+    '32120': 'Imitation Jewellery Manufacturing',
+    '46305': 'Wholesale Food & Commodities',
+    '46306': 'Wholesale Food & Commodities',
+    '46411': 'Wholesale Clothing & Textiles',
+    '46412': 'Wholesale Clothing & Textiles',
+    '46413': 'Wholesale Clothing & Textiles',
+    '46419': 'Wholesale Clothing & Textiles',
+    '47190': 'Home, Tech & Gifting Retail',
+    '47211': 'Food & Grocery Retail',
+    '47214': 'Food & Grocery Retail',
+    '47215': 'Food & Grocery Retail',
+    '47219': 'Food & Grocery Retail',
+    '47510': 'Clothing & Fabric Retail',
+    '47531': 'Home & Furnishings Retail',
+    '47532': 'Home & Furnishings Retail',
+    '47592': 'Home & Furnishings Retail',
+    '47711': 'Clothing & Fabric Retail',
+    '47713': 'Leather Goods Manufacturing',
+    '47722': 'Beauty & Cosmetics Retail',
+    '47732': 'Jewellery & Watches Retail',
+    '47733': 'Jewellery & Watches Retail',
+    '47734': 'Home & Furnishings Retail',
+    '47735': 'Handicrafts & Cultural Retail',
+    '47820': 'Clothing & Fabric Retail',
 }
 
 
@@ -161,7 +209,6 @@ class DashboardTrendsScraper:
             reloaded += 1
 
         print(f"✅ Reloaded {reloaded} products ({len(self.dashboard_data)} demand adjustments) from previous run")
-        # export is called from run_continuous after reload returns (with df)
 
     # ── FETCH ─────────────────────────────────────────────────────────────────
     def get_highly_random_delay(self, min_s, max_s):
@@ -274,7 +321,8 @@ class DashboardTrendsScraper:
         """
         Exports dashboard_trends_data.json as a flat array of rows —
         one row per State+Product, matching the Excel column structure exactly.
-        This is the format the dashboard reads directly.
+        Categories are always remapped from NIC_CATEGORY_MAP to ensure
+        consistency regardless of what the source Excel contains.
         """
         if df is None:
             print("\n⚠️  export_dashboard_json called without df — skipping")
@@ -287,10 +335,14 @@ class DashboardTrendsScraper:
 
         scraped_df = scraped_df.fillna('')
 
+        # Normalise NIC Code to string integer
         if 'NIC Code' in scraped_df.columns:
             scraped_df['NIC Code'] = scraped_df['NIC Code'].apply(
                 lambda x: str(int(float(x))) if x not in ('', None) else ''
             )
+
+        # Always remap Category from NIC code — never trust the Excel value
+        scraped_df['Category'] = scraped_df['NIC Code'].map(NIC_CATEGORY_MAP).fillna(scraped_df['Category'])
 
         rows = scraped_df.to_dict(orient='records')
 
@@ -394,7 +446,21 @@ class DashboardTrendsScraper:
 🔢 Batch size:   {PRODUCTS_PER_BATCH} products
 ⏱️  Term delays:  {MIN_SECONDS_BETWEEN_TERMS}-{MAX_SECONDS_BETWEEN_TERMS}s
 ⏱️  Batch delays: {MIN_MINUTES_BETWEEN_BATCHES}-{MAX_MINUTES_BETWEEN_BATCHES} minutes
+🔄 Fresh run:    {FRESH_RUN}
 """)
+
+        # ── FRESH RUN: wipe previous progress and output so everything
+        #    is re-scraped from scratch. Only triggered on scheduled runs
+        #    (--fresh true). Retrigger runs skip this block.
+        if FRESH_RUN:
+            if Path(PROGRESS_FILE).exists():
+                os.remove(PROGRESS_FILE)
+                print("🗑️  Cleared previous progress for fresh run")
+            if Path(OUTPUT_EXCEL).exists():
+                os.remove(OUTPUT_EXCEL)
+                print("🗑️  Cleared previous output Excel for fresh run")
+            self.progress = self.load_progress()  # reinitialise to empty
+
         print("📖 Loading Excel file...")
         try:
             if Path(OUTPUT_EXCEL).exists():
