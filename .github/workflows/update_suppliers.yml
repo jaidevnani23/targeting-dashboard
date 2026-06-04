@@ -157,6 +157,12 @@ jobs:
       # this step normally only needs to commit the checkpoint file. It also
       # picks up any xlsx files that failed their per-state push (fallback).
       #
+      # The glob `data/suppliers/suppliers_*.xlsx` intentionally does NOT
+      # match _tmp.xlsx or _dedup_tmp.xlsx files (FIX 27) — those are
+      # ephemeral and must never be committed. The script's finally blocks
+      # (FIX 25, FIX 26) ensure tmp files are cleaned up before this step
+      # runs, but the glob provides a second layer of protection.
+      #
       # Sets data_pushed=true on success (or when there is nothing to push),
       # and data_pushed=false if the push fails after all retries. The
       # retrigger job checks this output and will not fire if it is false,
