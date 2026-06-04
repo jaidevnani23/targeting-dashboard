@@ -22,9 +22,9 @@
   "failed": [],
   "in_progress": {
     "state": "KERALA",
-    "next_offset": 603000,
+    "next_offset": 936000,
     "xlsx_path": "data/suppliers/suppliers_Kerala.xlsx",
-    "rows_written": 59968
+    "rows_written": 93135
   },
   "runs_without_progress": 0
 }
