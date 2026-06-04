@@ -16,15 +16,16 @@
     "JAMMU AND KASHMIR",
     "JHARKHAND",
     "KARNATAKA",
+    "KERALA",
     "LADAKH",
     "LAKSHADWEEP"
   ],
   "failed": [],
   "in_progress": {
-    "state": "KERALA",
-    "next_offset": 936000,
-    "xlsx_path": "data/suppliers/suppliers_Kerala.xlsx",
-    "rows_written": 93135
+    "state": "MADHYA PRADESH",
+    "next_offset": 354000,
+    "xlsx_path": "data/suppliers/suppliers_Madhya_Pradesh.xlsx",
+    "rows_written": 38975
   },
   "runs_without_progress": 0
 }
