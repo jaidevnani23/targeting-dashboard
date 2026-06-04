@@ -1,5 +1,5 @@
 """
-MSME Supplier Fetcher  —  Production v9
+MSME Supplier Fetcher  —  Production v10
 ========================================
 Fetches MSME registered units from data.gov.in, filters by NIC codes
 defined in data/Key_NIC_Codes_List.xlsx, maps categories from
@@ -16,51 +16,56 @@ Exit codes (read by GitHub Actions):
     2  — states still pending (deadline/partial); workflow auto-retriggers
     3  — run limit hit (MAX_RUNS_WITHOUT_PROGRESS); retrigger chain stops
 
-CHANGES vs v8  (v9)
+CHANGES vs v9  (v10)
 ---------------------
-FIX 25 — _dedup_xlsx tmp file is cleaned up in a finally block.
+FIX 28 — Removed CSV intermediary entirely. Rows are now accumulated in
+    memory (a plain Python list) throughout pagination and written to xlsx
+    in a single atomic operation at state completion or deadline.
 
-    Problem: if the process was killed between df_clean.to_excel() completing
-    and os.replace() running (e.g. GitHub Actions hard-killing at
-    timeout-minutes ceiling), the _dedup_tmp.xlsx file was left on disk.
-    _dedup_all_existing then committed it via the git add sweep because it
-    matched the suppliers_*.xlsx glob, replacing the real output file with
-    a wrongly-named tmp file and causing the state to appear as failed on
-    the next run.
+    Problem (v9 and earlier): the ephemeral CSV was the only copy of
+    in-progress data for a state. If _csv_to_xlsx failed for any reason
+    (openpyxl error, OOM, disk full, process kill between os.remove and
+    os.replace) the data was silently lost and the state was still marked
+    complete. Gujarat lost data multiple times due to this.
 
-    Solution: a finally block removes the tmp file if it still exists after
-    the try/except, so an interrupted write can never leave an orphaned tmp.
+    Solution: accumulate all matching rows for a state in a list[dict] in
+    memory. At state completion (or deadline) write the list to xlsx in one
+    atomic operation (tmp file → os.replace). If the write fails the rows
+    are still in memory and can be retried; on deadline the exception is
+    caught, the partial xlsx is written from memory, and DeadlineReached is
+    re-raised. No CSV is ever written to disk.
 
-FIX 26 — _csv_to_xlsx tmp file is cleaned up in a finally block.
+    Memory impact: Gujarat produced ~274k rows × 9 string columns ≈ 50–80 MB
+    RAM, well within GitHub Actions runner limits (7 GB available).
 
-    Same problem and same solution as FIX 25 but for the _tmp.xlsx file
-    written by _csv_to_xlsx. Previously an interrupted write here would
-    also leave an orphaned _tmp.xlsx on disk.
+FIX 29 — _write_xlsx replaces _csv_to_xlsx. Writes a list[dict] directly
+    to xlsx via pandas + openpyxl. Uses an atomic tmp-file write so a
+    failed or interrupted write never leaves a corrupt file at the final
+    path. Raises on failure (never swallows exceptions silently).
 
-FIX 27 — _dedup_all_existing excludes tmp files from the os.listdir scan.
+FIX 30 — Resume rebuilds in-memory rows from partial xlsx on disk.
+    When a state is resumed, any rows already in the partial xlsx (pushed
+    to the repo at the previous deadline) are loaded back into the
+    in-memory list before pagination continues. This replaces the old
+    "materialise CSV from xlsx" logic and is simpler and safer.
 
-    Problem: both _tmp.xlsx and _dedup_tmp.xlsx matched the
-    `p.startswith("suppliers_") and p.endswith(".xlsx")` filter used to
-    build the list of files to dedup and later to git-add. This meant
-    orphaned tmp files (from FIX 25/26 scenarios) were treated as real
-    output files and committed.
-
-    Solution: add `and "_tmp" not in p` to the listdir filter. This covers
-    both suffix variants (_tmp.xlsx and _dedup_tmp.xlsx) with one check.
+FIX 31 — _append_to_csv and _count_csv_rows and _csv_path_for removed.
+    All CSV-related helpers and references have been deleted. The only
+    on-disk format is xlsx.
 
 Earlier fixes (retained):
     FIX 1  — urllib3 Retry excludes 429 from status_forcelist.
     FIX 4  — 429 backoff: 120 + 60*attempt seconds.
     FIX 5  — NIC codes parsed from Activities JSON column.
     FIX 6  — Batch size 1000, gap 4.5s.
-    FIX 7  — Per-page checkpointing + incremental CSV writes.
-    FIX 8  — Verify CSV/xlsx exists before trusting saved offset.
+    FIX 7  — Per-page checkpointing + incremental row accumulation.
+    FIX 8  — Verify xlsx exists before trusting saved offset.
     FIX 9  — Python-side deadline + DeadlineReached exception.
-    FIX 10 — Duplicate-row guard on CSV resume (atomic write).
+    FIX 10 — Duplicate-row guard on resume (dedup before write).
     FIX 11 — Validate page size before treating short pages as end-of-data.
     FIX 12 — Retry git push with exponential backoff (workflow level).
     FIX 13 — Run-limit safety valve to stop infinite retrigger loops.
-    FIX 14 — Output format changed from CSV to XLSX.
+    FIX 14 — Output format xlsx.
     FIX 15 — Per-state git commit + push from inside the script.
     FIX 16 — Save partial xlsx on deadline so the next run can resume.
     FIX 17 — Strip illegal XML control characters before writing xlsx.
@@ -71,6 +76,9 @@ Earlier fixes (retained):
     FIX 22 — git clean uses --exclude in all steps that precede pull --rebase.
     FIX 23 — git checkout -- . before git clean + pull in workflow steps.
     FIX 24 — Reconcile completed states from disk on startup.
+    FIX 25 — _dedup_xlsx tmp file cleaned up in finally block. (retained)
+    FIX 26 — Removed (_csv_to_xlsx no longer exists).
+    FIX 27 — _dedup_all_existing excludes tmp files from os.listdir scan.
 
 Requirements:
     pip install requests pandas openpyxl
@@ -138,7 +146,7 @@ _last_request_at: float = 0.0
 
 ACTIVITIES_COLUMN = "Activities"
 
-# Compiled once at import time — used by _sanitise_df() (FIX 17)
+# Compiled once at import time — used by _sanitise_rows() (FIX 17)
 _ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # ── Sentinel exceptions ───────────────────────────────────────────────────────
@@ -389,98 +397,64 @@ def _filter_rows(
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ATOMIC CSV APPEND  (FIX 10)
+#  XLSX WRITE  (FIX 28, FIX 29)
 # ─────────────────────────────────────────────────────────────────────────────
-def _count_csv_rows(path: str) -> int:
-    if not os.path.exists(path):
-        return 0
-    try:
-        with open(path, encoding="utf-8-sig") as f:
-            return sum(1 for _ in f) - 1
-    except Exception:
-        return 0
-
-
-def _append_to_csv(path: str, records: list[dict]) -> None:
-    if not records:
-        return
-
-    existing_rows: list[dict] = []
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f)
-                existing_rows = list(reader)
-        except Exception as exc:
-            log.warning(f"Could not read existing CSV {path} ({exc}) — will overwrite.")
-            existing_rows = []
-
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
-        writer.writeheader()
-        if existing_rows:
-            writer.writerows(existing_rows)
-        writer.writerows(records)
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp_path, path)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  XLSX HELPERS  (FIX 14, FIX 17)
-# ─────────────────────────────────────────────────────────────────────────────
-def _sanitise_df(df: pd.DataFrame) -> pd.DataFrame:
+def _sanitise_rows(rows: list[dict]) -> list[dict]:
     """
-    Strip XML 1.0 illegal control characters from every string column. (FIX 17)
-
-    openpyxl serialises xlsx as XML. The XML 1.0 spec forbids characters in
-    the ranges \\x00–\\x08, \\x0b, \\x0c, \\x0e–\\x1f (the only allowed
-    control chars are \\x09 tab, \\x0a newline, \\x0d carriage-return). Any
-    such character in a cell value raises:
-        "X cannot be used in worksheets"
-    and aborts the entire state write after all records have been fetched.
-
-    This pass removes the offending characters silently. Legitimate text
-    (including tab/newline/CR) is preserved.
+    Strip XML 1.0 illegal control characters from every string value. (FIX 17)
+    Works directly on the in-memory list so no DataFrame round-trip is needed
+    until the final write.
     """
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].str.replace(_ILLEGAL_XML_RE, "", regex=True)
-    return df
+    cleaned = []
+    for row in rows:
+        cleaned.append({
+            k: _ILLEGAL_XML_RE.sub("", v) if isinstance(v, str) else v
+            for k, v in row.items()
+        })
+    return cleaned
 
 
-def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
+def _write_xlsx(rows: list[dict], xlsx_path: str) -> None:
     """
-    Convert the ephemeral CSV to xlsx, applying sanitisation (FIX 17) and
-    deduplication (FIX 19) before writing, then delete the CSV.
+    Write rows to xlsx atomically via a tmp file. (FIX 28, FIX 29)
 
-    FIX 26: tmp file is always removed in a finally block so an interrupted
-    write can never leave an orphaned _tmp.xlsx on disk.
+    - Sanitises illegal XML characters (FIX 17).
+    - Deduplicates on all OUTPUT_COLUMNS (FIX 19).
+    - Atomic write: writes to _tmp.xlsx then os.replace → final path.
+    - Raises on any failure — never swallows exceptions silently.
+    - Cleans up the tmp file in a finally block.
+
+    This replaces _csv_to_xlsx entirely. No CSV is ever written to disk.
     """
-    df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig")
+    rows = _sanitise_rows(rows)
+
+    df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
     for col in OUTPUT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
     df = df[OUTPUT_COLUMNS]
-    df = _sanitise_df(df)
 
-    before   = len(df)
-    df       = df.drop_duplicates(subset=OUTPUT_COLUMNS, keep="first")
-    removed  = before - len(df)
+    before  = len(df)
+    df      = df.drop_duplicates(subset=OUTPUT_COLUMNS, keep="first")
+    removed = before - len(df)
     if removed:
-        log.info(f"[{os.path.basename(xlsx_path)}] Dedup removed {removed:,} duplicate rows ({len(df):,} remain).")
+        log.info(
+            f"[{os.path.basename(xlsx_path)}] Dedup removed {removed:,} duplicate rows "
+            f"({len(df):,} remain)."
+        )
 
     tmp_path = xlsx_path.replace(".xlsx", "_tmp.xlsx")
     try:
         df.to_excel(tmp_path, index=False, engine="openpyxl")
         os.replace(tmp_path, xlsx_path)
     except Exception as exc:
-        log.warning(f"Could not write xlsx {os.path.basename(xlsx_path)} ({exc})")
-        return
+        # Raise so the caller knows the write failed — never mark state complete
+        # on a failed write (FIX 28).
+        raise RuntimeError(
+            f"Failed to write xlsx {os.path.basename(xlsx_path)}: {exc}"
+        ) from exc
     finally:
-        # FIX 26: clean up tmp file even if the process is killed mid-write
+        # Always clean up tmp file even if the process is killed mid-write.
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -488,15 +462,14 @@ def _csv_to_xlsx(csv_path: str, xlsx_path: str) -> None:
             pass
 
     size_mb = os.path.getsize(xlsx_path) / 1024 / 1024
-    log.info(f"xlsx written: {xlsx_path} ({size_mb:.2f} MB, {len(df):,} rows)")
-
-    try:
-        os.remove(csv_path)
-    except OSError:
-        pass
-    log.info(f"Ephemeral CSV deleted: {csv_path}")
+    log.info(
+        f"xlsx written: {xlsx_path} ({size_mb:.2f} MB, {len(df):,} rows)"
+    )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  XLSX HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 def _count_xlsx_rows(path: str) -> int:
     if not os.path.exists(path):
         return 0
@@ -525,7 +498,6 @@ def _dedup_xlsx(xlsx_path: str) -> int:
     """
     Deduplicate an existing xlsx file in-place (atomic write via tmp file).
     Returns the number of duplicate rows removed. 0 if already clean.
-    Uses all OUTPUT_COLUMNS as the dedup key (Option A — exact match).
 
     FIX 25: tmp file is always removed in a finally block so an interrupted
     write can never leave an orphaned _dedup_tmp.xlsx on disk.
@@ -575,13 +547,8 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
     Scan every suppliers_*.xlsx in OUTPUT_DIR, deduplicate each one, and
     commit any files that changed.
 
-    For partial files (state listed in cp['in_progress']), rows_written
-    in the checkpoint is updated to the post-dedup row count so the
-    resume logic in process_state() does not reset to offset 0.
-
     FIX 27: tmp files (_tmp.xlsx, _dedup_tmp.xlsx) are excluded from the
-    scan so orphaned tmp files are never treated as real output files and
-    never accidentally committed to the repo.
+    scan so orphaned tmp files are never treated as real output files.
     """
     if not os.path.isdir(OUTPUT_DIR):
         return
@@ -589,7 +556,7 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
     xlsx_files = sorted(
         p for p in os.listdir(OUTPUT_DIR)
         if p.startswith("suppliers_") and p.endswith(".xlsx")
-        and "_tmp" not in p  # FIX 27: exclude _tmp.xlsx and _dedup_tmp.xlsx
+        and "_tmp" not in p  # FIX 27
     )
 
     if not xlsx_files:
@@ -679,15 +646,6 @@ def _dedup_all_existing(cp: dict, dry_run: bool) -> None:
 #  GIT COMMIT HELPER  (FIX 15)
 # ─────────────────────────────────────────────────────────────────────────────
 def _git_commit_xlsx(xlsx_path: str, state: str, partial: bool = False) -> None:
-    """
-    Commit and push a single state xlsx file immediately after it is produced.
-
-    IMPORTANT: git user identity (user.name / user.email) and the remote URL
-    must be configured in the workflow BEFORE this script is invoked.
-
-    If the push fails after all retries the xlsx remains on disk and the
-    workflow's final commit step will pick it up as a fallback.
-    """
     label = "partial" if partial else "complete"
     msg   = f"chore(data): suppliers {state.title()} [{label}]"
 
@@ -770,28 +728,13 @@ def _safe_filename(s: str) -> str:
         .replace("\\", "-").replace(":", "")
     )
 
-def _csv_path_for(state: str) -> str:
-    """Ephemeral CSV — lives only on the runner's local disk, never committed."""
-    return os.path.join(OUTPUT_DIR, f"_partial_{_safe_filename(state)}.csv")
-
 def _xlsx_path_for(state: str) -> str:
-    """Final output — committed to git."""
     return os.path.join(OUTPUT_DIR, f"suppliers_{_safe_filename(state)}.xlsx")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  COMPLETED-STATE RECONCILIATION  (FIX 24)
-#
-#  Handles the case where a state's xlsx was pushed to the repo but the
-#  checkpoint was not (e.g. the commit step failed). On the next run the
-#  state appears in `pending` even though its data is already complete on
-#  disk, causing an unnecessary re-fetch.
 # ─────────────────────────────────────────────────────────────────────────────
 def _reconcile_completed_from_disk(cp: dict, dry_run: bool) -> None:
-    """
-    Auto-mark states as completed when their xlsx exists on disk but the
-    checkpoint does not know about them yet (stale checkpoint after a
-    failed push).
-    """
     if not os.path.isdir(OUTPUT_DIR):
         return
 
@@ -847,46 +790,36 @@ def process_state(
     dry_run: bool = False,
 ) -> int:
     """
-    Fetch all pages for a state, writing rows and the checkpoint after every
-    page. On completion converts the CSV to xlsx (with sanitisation and
-    deduplication), then commits and pushes. On deadline, saves a partial
-    xlsx and commits it so the next run can resume from the saved offset
-    (FIX 16). Raises DeadlineReached when the run time limit is hit.
+    Fetch all pages for a state, accumulating matching rows in memory.
+    On completion writes a single xlsx atomically and commits it.
+    On deadline writes a partial xlsx from the in-memory rows and commits
+    it, then raises DeadlineReached so the next run can resume from the
+    saved offset. (FIX 28, FIX 29, FIX 30)
+
     Returns the number of matching rows written this session.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    csv_path  = _csv_path_for(state)
     xlsx_path = _xlsx_path_for(state)
 
-    # ── Determine resume offset (FIX 8 + FIX 10 + FIX 16) ───────────────
+    # ── Determine resume offset (FIX 8, FIX 24) ──────────────────────────
     ip = cp.get("in_progress") or {}
     if ip.get("state") == state and ip.get("next_offset") is not None:
         saved_offset       = ip["next_offset"]
         saved_rows_written = ip.get("rows_written", 0)
-
-        if os.path.exists(csv_path):
-            on_disk_rows = _count_csv_rows(csv_path)
-            source_label = "ephemeral CSV"
-        else:
-            on_disk_rows = _count_xlsx_rows(xlsx_path)
-            source_label = "partial xlsx (from repo)"
+        on_disk_rows       = _count_xlsx_rows(xlsx_path)
 
         if on_disk_rows == 0:
             log.warning(
                 f"[{state}] Checkpoint claims offset={saved_offset} but no "
-                f"CSV or xlsx found on disk — restarting from 0."
+                f"xlsx found on disk — restarting from 0."
             )
             start_offset = 0
             rows_written = 0
-            if os.path.exists(xlsx_path):
-                os.remove(xlsx_path)
         elif on_disk_rows > saved_rows_written:
-            # FIX 24: file is larger than checkpoint recorded — state completed
-            # in a prior run but the checkpoint push failed. Mark as done.
+            # State completed in a prior run but checkpoint push failed.
             log.info(
-                f"[{state}] {source_label} has {on_disk_rows:,} rows which exceeds "
-                f"checkpoint rows_written={saved_rows_written:,} — state was likely "
-                f"completed but checkpoint was not pushed. Marking as complete."
+                f"[{state}] xlsx has {on_disk_rows:,} rows which exceeds "
+                f"checkpoint rows_written={saved_rows_written:,} — marking as complete."
             )
             completed_list = cp.get("completed", [])
             if state not in completed_list:
@@ -898,12 +831,11 @@ def process_state(
             return on_disk_rows
         elif on_disk_rows < saved_rows_written:
             log.warning(
-                f"[{state}] {source_label} has {on_disk_rows:,} rows but "
-                f"checkpoint says {saved_rows_written:,} — file is truncated, restarting from 0."
+                f"[{state}] xlsx has {on_disk_rows:,} rows but checkpoint says "
+                f"{saved_rows_written:,} — file is truncated, restarting from 0."
             )
-            for p in (csv_path, xlsx_path):
-                if os.path.exists(p):
-                    os.remove(p)
+            if os.path.exists(xlsx_path):
+                os.remove(xlsx_path)
             start_offset = 0
             rows_written = 0
         else:
@@ -911,32 +843,25 @@ def process_state(
             rows_written = saved_rows_written
             log.info(
                 f"[{state}] Resuming from offset={start_offset} "
-                f"({rows_written:,} rows confirmed in {source_label})"
+                f"({rows_written:,} rows confirmed in partial xlsx)"
             )
-            # Materialise ephemeral CSV from partial xlsx so pagination can
-            # append to it on a fresh runner (FIX 16).
-            if not os.path.exists(csv_path) and os.path.exists(xlsx_path):
-                log.info(
-                    f"[{state}] Materialising ephemeral CSV from partial xlsx "
-                    f"so pagination can resume."
-                )
-                existing_rows = _read_xlsx_rows(xlsx_path)
-                if existing_rows and not dry_run:
-                    tmp_csv = csv_path + ".tmp"
-                    with open(tmp_csv, "w", newline="", encoding="utf-8-sig") as f:
-                        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
-                        writer.writeheader()
-                        writer.writerows(existing_rows)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(tmp_csv, csv_path)
     else:
         start_offset = 0
         rows_written = 0
-        for p in (csv_path, xlsx_path):
-            if os.path.exists(p):
-                os.remove(p)
-                log.info(f"[{state}] Removed stale file from previous attempt: {os.path.basename(p)}")
+        if os.path.exists(xlsx_path):
+            os.remove(xlsx_path)
+            log.info(f"[{state}] Removed stale xlsx from previous attempt.")
+
+    # ── Load existing rows from partial xlsx into memory (FIX 30) ────────
+    # On a resumed run the partial xlsx (pushed at the previous deadline)
+    # is read back into memory so all rows end up in one final write.
+    # This replaces the old "materialise CSV from xlsx" logic entirely.
+    accumulated: list[dict] = []
+    if start_offset > 0 and os.path.exists(xlsx_path):
+        accumulated = _read_xlsx_rows(xlsx_path)
+        log.info(
+            f"[{state}] Loaded {len(accumulated):,} existing rows from partial xlsx into memory."
+        )
 
     if not dry_run:
         cp["in_progress"] = {
@@ -951,9 +876,7 @@ def process_state(
     page_num          = 0
     first_page        = True
     short_page_streak = 0
-    # FIX 20: manage offset manually so short-page retries re-fetch the
-    # same offset instead of silently advancing to offset + BATCH_SIZE.
-    offset = start_offset
+    offset            = start_offset
 
     while True:
         page_num += 1
@@ -967,10 +890,7 @@ def process_state(
             )
             break
 
-        # ── Short-page handling (FIX 11 + FIX 20) ────────────────────────
-        # On a short page we retry WITHOUT advancing offset so the same
-        # page is re-fetched. Only advance offset once the page is either
-        # full-size or confirmed as the last page after all retries.
+        # ── Short-page handling (FIX 11, FIX 20) ─────────────────────────
         if len(rows) < BATCH_SIZE:
             short_page_streak += 1
             if short_page_streak <= SHORT_PAGE_RETRIES:
@@ -979,8 +899,8 @@ def process_state(
                     f"— may be truncated, retrying ({short_page_streak}/{SHORT_PAGE_RETRIES})."
                 )
                 time.sleep(RETRY_BASE * short_page_streak)
-                page_num -= 1   # don't count the retry as a new page
-                continue        # re-fetch the same offset (FIX 20)
+                page_num -= 1
+                continue
             else:
                 log.info(
                     f"[{state}] Short page confirmed as last page after "
@@ -1005,8 +925,9 @@ def process_state(
         total_raw    += len(rows)
         page_records  = _filter_rows(state, rows, nic_set, nic_desc, cat_map)
 
-        if not dry_run and page_records:
-            _append_to_csv(csv_path, page_records)
+        # Accumulate in memory — no disk write per page (FIX 28)
+        if not dry_run:
+            accumulated.extend(page_records)
 
         rows_written += len(page_records)
         next_offset   = offset + BATCH_SIZE
@@ -1025,48 +946,50 @@ def process_state(
             f"{total_raw:,} raw records fetched"
         )
 
-        # Deadline check (FIX 9) — after checkpoint so progress is always saved
+        # ── Deadline check (FIX 9, FIX 16, FIX 28) ───────────────────────
+        # Write whatever is accumulated to a partial xlsx and push it,
+        # then raise DeadlineReached. The next run loads this xlsx back
+        # into memory (FIX 30) and resumes from next_offset.
         elapsed = time.monotonic() - _run_start
         if elapsed >= RUN_DEADLINE_SECONDS:
             log.info(
                 f"[{state}] Deadline reached after {elapsed/3600:.2f}h — "
-                f"stopping at offset={next_offset}. "
-                f"Saving partial xlsx and committing before exit."
+                f"saving partial xlsx ({len(accumulated):,} rows) and exiting."
             )
-            # FIX 16: convert partial CSV → partial xlsx and push so the
-            # next run (on a fresh runner) can resume from saved_offset.
-            if not dry_run and os.path.exists(csv_path):
+            if not dry_run and accumulated:
                 try:
-                    _csv_to_xlsx(csv_path, xlsx_path)
+                    _write_xlsx(accumulated, xlsx_path)
                     _git_commit_xlsx(xlsx_path, state, partial=True)
                 except Exception as exc:
                     log.warning(
                         f"[{state}] Could not save partial xlsx on deadline ({exc}). "
-                        "Next run will restart this state from offset 0."
+                        f"Next run will restart this state from offset 0."
                     )
             raise DeadlineReached()
 
-        # Accept short page as last page (after retries exhausted above)
+        # Accept short page as last page
         if len(rows) < BATCH_SIZE:
             break
 
-        # Advance to next page only after the current one is fully processed
         offset = next_offset
 
-    # ── State complete ────────────────────────────────────────────────────
+    # ── State complete — single xlsx write (FIX 28, FIX 29) ─────────────
     log.info(
         f"[{state}] Complete — {rows_written:,} matching rows "
         f"(from {total_raw:,} total records)"
     )
 
     if not dry_run:
-        if os.path.exists(csv_path):
-            _csv_to_xlsx(csv_path, xlsx_path)
+        # _write_xlsx raises on failure so the state is never marked
+        # complete unless the file is actually on disk (FIX 28).
+        if accumulated:
+            _write_xlsx(accumulated, xlsx_path)
         else:
-            # No matching rows — write an empty xlsx so the state is still
-            # represented in the output folder.
+            # No matching rows — write empty xlsx so state is represented.
             df = pd.DataFrame(columns=OUTPUT_COLUMNS)
             df.to_excel(xlsx_path, index=False, engine="openpyxl")
+            log.info(f"[{state}] No matching rows — wrote empty xlsx.")
+
         _git_commit_xlsx(xlsx_path, state, partial=False)
 
     return rows_written
@@ -1075,7 +998,7 @@ def process_state(
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v9")
+    parser = argparse.ArgumentParser(description="MSME Supplier Fetcher v10")
     parser.add_argument("--reset",   action="store_true", help="Ignore checkpoint and restart")
     parser.add_argument("--state",   type=str, default=None, help="Run a single state")
     parser.add_argument("--dry-run", action="store_true", help="Fetch+filter, no file writes")
@@ -1102,13 +1025,11 @@ def main() -> None:
         else:
             cp = _load_checkpoint()
 
-        # ── FIX 13: stall detection ───────────────────────────────────────
         runs_without_progress = cp.get("runs_without_progress", 0)
         if runs_without_progress >= MAX_RUNS_WITHOUT_PROGRESS:
             log.error(
                 f"No new states completed in the last {runs_without_progress} runs. "
-                f"Stopping retrigger chain to avoid infinite loop. "
-                f"Investigate failed states, then use --reset or delete the checkpoint to resume."
+                f"Stopping retrigger chain. Use --reset or delete the checkpoint to resume."
             )
             raise RunLimitReached()
 
@@ -1120,12 +1041,7 @@ def main() -> None:
         else:
             pending = remaining
 
-        # ── FIX 24: reconcile completed states from disk before fetching ──
-        # Auto-marks states whose xlsx is on disk but missing from the
-        # checkpoint (stale checkpoint after a failed push). Runs before
-        # dedup so the pending list is accurate when dedup scans files.
         _reconcile_completed_from_disk(cp, dry_run=args.dry_run)
-        # Rebuild pending after reconciliation.
         completed = set(cp.get("completed", []))
         ip_state  = (cp.get("in_progress") or {}).get("state")
         remaining = [s for s in STATES_AND_UTS if s not in completed]
@@ -1134,15 +1050,12 @@ def main() -> None:
         else:
             pending = remaining
 
-        # ── FIX 19-CALL: deduplicate all existing xlsx files ──────────────
-        # Runs after reconciliation so in_progress rows_written can be
-        # updated if the partial file for the resuming state is cleaned.
         _dedup_all_existing(cp, dry_run=args.dry_run)
 
     skipped = len(STATES_AND_UTS) - len(pending) if not args.state else 0
 
     print(f"\n{'═'*64}")
-    print(f"  MSME Supplier Fetcher  v9  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  MSME Supplier Fetcher  v10  {'[DRY RUN]' if args.dry_run else ''}")
     print(f"  Resource ID           : {RESOURCE_ID}")
     print(f"  NIC codes loaded      : {len(nic_set)}")
     print(f"  States pending        : {len(pending)}  (skipped: {skipped})")
@@ -1194,7 +1107,6 @@ def main() -> None:
             if not args.state and not args.dry_run:
                 _save_checkpoint(cp)
 
-    # ── Post-loop stall counter (non-deadline exits only) ─────────────────
     if (
         completed_this_run == 0
         and not deadline_hit
