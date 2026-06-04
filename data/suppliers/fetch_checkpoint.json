@@ -22,7 +22,7 @@
     "state": "KARNATAKA",
     "next_offset": 2180000,
     "xlsx_path": "data/suppliers/suppliers_Karnataka.xlsx",
-    "rows_written": 166097
+    "rows_written": 157028
   },
   "runs_without_progress": 0
 }
