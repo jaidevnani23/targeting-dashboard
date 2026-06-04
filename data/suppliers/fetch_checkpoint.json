@@ -7,6 +7,7 @@
     "BIHAR",
     "CHANDIGARH",
     "CHHATTISGARH",
+    "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
     "DELHI",
     "GOA",
     "HIMACHAL PRADESH",
@@ -18,10 +19,10 @@
   ],
   "failed": [],
   "in_progress": {
-    "state": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
-    "next_offset": 0,
-    "xlsx_path": "data/suppliers/suppliers_Dadra_And_Nagar_Haveli_And_Daman_And_Diu.xlsx",
-    "rows_written": 0
+    "state": "GUJARAT",
+    "next_offset": 2652000,
+    "xlsx_path": "data/suppliers/suppliers_Gujarat.xlsx",
+    "rows_written": 274480
   },
   "runs_without_progress": 0
 }
