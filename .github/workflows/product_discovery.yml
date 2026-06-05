@@ -1,0 +1,58 @@
+name: Product Discovery
+
+on:
+  schedule:
+    - cron: '0 8 1 1,4,7,10 *'   # 1st of Jan, Apr, Jul, Oct at 08:00 UTC / 13:30 IST
+  workflow_dispatch:               # manual trigger
+
+jobs:
+  discover-products:
+    name: Discover Products
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-products-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-products-
+
+      - name: Install dependencies
+        # beautifulsoup4 + lxml required for product_discovery.py scraping.
+        run: pip install requests pandas openpyxl beautifulsoup4 lxml
+
+      - name: Run product discovery
+        env:
+          BD_WEB_ACCESS_KEY: ${{ secrets.BD_WEB_ACCESS_KEY }}
+        run: python product_discovery.py
+
+      - name: Verify output was produced
+        run: |
+          if [ ! -f "data/Demand_Excel_Filled.xlsx" ]; then
+            echo "::error::Demand_Excel_Filled.xlsx not found — product discovery may have failed."
+            exit 1
+          fi
+          echo "Demand_Excel_Filled.xlsx present — OK"
+
+      - name: Commit and push updated demand file
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add data/Demand_Excel_Filled.xlsx
+          if git diff --cached --quiet; then
+            echo "No changes to commit — no new products discovered."
+          else
+            git commit -m "chore(data): append new products from discovery [$(date -u +'%Y-%m-%d')]"
+            git push
+          fi
