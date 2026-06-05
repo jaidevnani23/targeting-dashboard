@@ -18,14 +18,15 @@
     "KARNATAKA",
     "KERALA",
     "LADAKH",
-    "LAKSHADWEEP"
+    "LAKSHADWEEP",
+    "MADHYA PRADESH"
   ],
   "failed": [],
   "in_progress": {
-    "state": "MADHYA PRADESH",
-    "next_offset": 354000,
-    "xlsx_path": "data/suppliers/suppliers_Madhya_Pradesh.xlsx",
-    "rows_written": 38975
+    "state": "MAHARASHTRA",
+    "next_offset": 2782000,
+    "xlsx_path": "data/suppliers/suppliers_Maharashtra.xlsx",
+    "rows_written": 260986
   },
   "runs_without_progress": 0
 }
