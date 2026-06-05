@@ -1,7 +1,7 @@
 name: Update Google Trends Data
 on:
   schedule:
-    - cron: '0 6 4 * *' #Runs at 11.30am IST on 4th of every month
+    - cron: '0 6 4 * *'   # Runs at 11:30am IST on 4th of every month
   workflow_dispatch:
     inputs:
       fresh_run:
@@ -43,7 +43,7 @@ jobs:
             echo "⚠️ Signal received — committing progress before exit..."
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add data/scraping_progress.json data/Demand_Excel_With_Trends.xlsx data/dashboard_trends_data.json || true
+            git add data/scraping_progress.json data/dashboard_trends_data.json || true
             git diff --staged --quiet || git commit -m "Partial progress $(date +'%Y-%m-%d %H:%M:%S')"
             git pull --rebase origin main || true
             git push || true
@@ -81,20 +81,25 @@ jobs:
           import pandas as pd
 
           progress_file = Path("data/scraping_progress.json")
-          excel_file    = Path("data/Demand_Excel_With_Trends.xlsx")
+          excel_file    = Path("data/Demand_Excel_Filled.xlsx")
 
           if not progress_file.exists() or not excel_file.exists():
-              print("No progress file found — assuming first run or incomplete")
+              print("No progress file or demand file found — assuming first run or incomplete")
               open("RETRIGGER", "w").close()
               sys.exit(0)
 
           with open(progress_file) as f:
               progress = json.load(f)
 
-          df        = pd.read_excel(excel_file)
-          total     = len(df)
-          scraped   = len(progress.get("scraped_indices", []))
-          remaining = total - scraped
+          df      = pd.read_excel(excel_file)
+          # Only count rows that have a Search Term — blank rows can't be scraped
+          df      = df[df['Search Term'].notna() & (df['Search Term'].astype(str).str.strip() != '')]
+          total   = len(df)
+          scraped = len(progress.get("scraped_indices", []))
+
+          # remaining is capped at 0 since scraped_indices may reference
+          # row numbers from the full file, not just the filtered subset
+          remaining = max(0, total - scraped)
 
           # Only count products that have failed 5 times or fewer
           # Products failing more than 5 times are likely permanently
@@ -105,10 +110,10 @@ jobs:
           }
           failed = len(actionable_failures)
 
-          print(f"Total:     {total}")
-          print(f"Scraped:   {scraped}")
-          print(f"Remaining: {remaining}")
-          print(f"Failed:    {failed} (capped at 5 attempts each)")
+          print(f"Total (with Search Term): {total}")
+          print(f"Scraped:                 {scraped}")
+          print(f"Remaining:               {remaining}")
+          print(f"Failed:                  {failed} (capped at 5 attempts each)")
 
           if remaining > 0 or failed > 0:
               print("⏳ Work remains — will re-trigger after 20 min")
