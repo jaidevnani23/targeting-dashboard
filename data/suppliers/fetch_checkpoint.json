@@ -24,9 +24,9 @@
   "failed": [],
   "in_progress": {
     "state": "MAHARASHTRA",
-    "next_offset": 4014000,
+    "next_offset": 4303000,
     "xlsx_path": "data/suppliers/suppliers_Maharashtra.xlsx",
-    "rows_written": 378049
+    "rows_written": 406317
   },
   "runs_without_progress": 0
 }
