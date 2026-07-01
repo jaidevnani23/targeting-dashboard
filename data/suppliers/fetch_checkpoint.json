@@ -19,16 +19,17 @@
     "KERALA",
     "LADAKH",
     "LAKSHADWEEP",
-    "MADHYA PRADESH"
+    "MADHYA PRADESH",
+    "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
-    "next_offset": 27000,
-    "xlsx_path": "data/suppliers/suppliers_The_Dadra_And_Nagar_Haveli_And_Daman_And_Diu.xlsx",
-    "rows_written": 2520
+    "state": "MANIPUR",
+    "next_offset": 113000,
+    "xlsx_path": "data/suppliers/suppliers_Manipur.xlsx",
+    "rows_written": 13809
   },
   "runs_without_progress": 0
 }
