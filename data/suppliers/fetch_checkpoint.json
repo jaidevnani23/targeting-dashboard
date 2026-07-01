@@ -21,12 +21,14 @@
     "LAKSHADWEEP",
     "MADHYA PRADESH"
   ],
-  "failed": [],
+  "failed": [
+    "MAHARASHTRA"
+  ],
   "in_progress": {
-    "state": "MAHARASHTRA",
-    "next_offset": 4103000,
-    "xlsx_path": "data/suppliers/suppliers_Maharashtra.xlsx",
-    "rows_written": 388771
+    "state": "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
+    "next_offset": 27000,
+    "xlsx_path": "data/suppliers/suppliers_The_Dadra_And_Nagar_Haveli_And_Daman_And_Diu.xlsx",
+    "rows_written": 2520
   },
   "runs_without_progress": 0
 }
