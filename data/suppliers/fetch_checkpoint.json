@@ -20,16 +20,17 @@
     "LADAKH",
     "LAKSHADWEEP",
     "MADHYA PRADESH",
+    "MANIPUR",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "MANIPUR",
-    "next_offset": 113000,
-    "xlsx_path": "data/suppliers/suppliers_Manipur.xlsx",
-    "rows_written": 13809
+    "state": "MEGHALAYA",
+    "next_offset": 49000,
+    "xlsx_path": "data/suppliers/suppliers_Meghalaya.xlsx",
+    "rows_written": 6470
   },
   "runs_without_progress": 0
 }
