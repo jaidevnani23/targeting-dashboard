@@ -22,16 +22,17 @@
     "MADHYA PRADESH",
     "MANIPUR",
     "MEGHALAYA",
+    "MIZORAM",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "MIZORAM",
-    "next_offset": 34000,
-    "xlsx_path": "data/suppliers/suppliers_Mizoram.xlsx",
-    "rows_written": 6956
+    "state": "NAGALAND",
+    "next_offset": 43000,
+    "xlsx_path": "data/suppliers/suppliers_Nagaland.xlsx",
+    "rows_written": 6317
   },
   "runs_without_progress": 0
 }
