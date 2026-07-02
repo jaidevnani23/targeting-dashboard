@@ -38,9 +38,9 @@
   ],
   "in_progress": {
     "state": "TELANGANA",
-    "next_offset": 766000,
+    "next_offset": 1740000,
     "xlsx_path": "data/suppliers/suppliers_Telangana.xlsx",
-    "rows_written": 56177
+    "rows_written": 127697
   },
   "runs_without_progress": 0
 }
