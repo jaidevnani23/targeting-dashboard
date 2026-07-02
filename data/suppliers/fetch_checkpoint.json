@@ -25,16 +25,17 @@
     "MIZORAM",
     "NAGALAND",
     "ODISHA",
+    "PUDUCHERRY",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "PUDUCHERRY",
-    "next_offset": 57000,
-    "xlsx_path": "data/suppliers/suppliers_Puducherry.xlsx",
-    "rows_written": 5159
+    "state": "PUNJAB",
+    "next_offset": 1469000,
+    "xlsx_path": "data/suppliers/suppliers_Punjab.xlsx",
+    "rows_written": 210292
   },
   "runs_without_progress": 0
 }
