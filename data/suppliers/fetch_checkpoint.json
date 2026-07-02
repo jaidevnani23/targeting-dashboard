@@ -23,16 +23,17 @@
     "MANIPUR",
     "MEGHALAYA",
     "MIZORAM",
+    "NAGALAND",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "NAGALAND",
-    "next_offset": 43000,
-    "xlsx_path": "data/suppliers/suppliers_Nagaland.xlsx",
-    "rows_written": 6317
+    "state": "ODISHA",
+    "next_offset": 1256000,
+    "xlsx_path": "data/suppliers/suppliers_Odisha.xlsx",
+    "rows_written": 147980
   },
   "runs_without_progress": 0
 }
