@@ -37,9 +37,9 @@
   ],
   "in_progress": {
     "state": "TAMIL NADU",
-    "next_offset": 1603000,
+    "next_offset": 3680000,
     "xlsx_path": "data/suppliers/suppliers_Tamil_Nadu.xlsx",
-    "rows_written": 125832
+    "rows_written": 290152
   },
   "runs_without_progress": 0
 }
