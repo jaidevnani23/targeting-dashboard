@@ -28,16 +28,17 @@
     "ODISHA",
     "PUDUCHERRY",
     "PUNJAB",
+    "RAJASTHAN",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "RAJASTHAN",
-    "next_offset": 2848000,
-    "xlsx_path": "data/suppliers/suppliers_Rajasthan.xlsx",
-    "rows_written": 293419
+    "state": "SIKKIM",
+    "next_offset": 20000,
+    "xlsx_path": "data/suppliers/suppliers_Sikkim.xlsx",
+    "rows_written": 2628
   },
   "runs_without_progress": 0
 }
