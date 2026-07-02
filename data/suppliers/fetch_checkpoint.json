@@ -24,16 +24,17 @@
     "MEGHALAYA",
     "MIZORAM",
     "NAGALAND",
+    "ODISHA",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "ODISHA",
-    "next_offset": 1256000,
-    "xlsx_path": "data/suppliers/suppliers_Odisha.xlsx",
-    "rows_written": 147980
+    "state": "PUDUCHERRY",
+    "next_offset": 57000,
+    "xlsx_path": "data/suppliers/suppliers_Puducherry.xlsx",
+    "rows_written": 5159
   },
   "runs_without_progress": 0
 }
