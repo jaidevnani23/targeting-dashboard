@@ -31,16 +31,17 @@
     "RAJASTHAN",
     "SIKKIM",
     "TAMIL NADU",
+    "TELANGANA",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "TELANGANA",
-    "next_offset": 1740000,
-    "xlsx_path": "data/suppliers/suppliers_Telangana.xlsx",
-    "rows_written": 127697
+    "state": "TRIPURA",
+    "next_offset": 105000,
+    "xlsx_path": "data/suppliers/suppliers_Tripura.xlsx",
+    "rows_written": 11920
   },
   "runs_without_progress": 0
 }
