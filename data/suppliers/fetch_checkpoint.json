@@ -41,9 +41,9 @@
   ],
   "in_progress": {
     "state": "UTTARAKHAND",
-    "next_offset": 63000,
+    "next_offset": 406000,
     "xlsx_path": "data/suppliers/suppliers_Uttarakhand.xlsx",
-    "rows_written": 8505
+    "rows_written": 54164
   },
   "runs_without_progress": 0
 }
