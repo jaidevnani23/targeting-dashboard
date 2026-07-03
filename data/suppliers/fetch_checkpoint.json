@@ -33,16 +33,17 @@
     "TAMIL NADU",
     "TELANGANA",
     "THE DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
-    "TRIPURA"
+    "TRIPURA",
+    "UTTAR PRADESH"
   ],
   "failed": [
     "MAHARASHTRA"
   ],
   "in_progress": {
-    "state": "UTTAR PRADESH",
-    "next_offset": 4312000,
-    "xlsx_path": "data/suppliers/suppliers_Uttar_Pradesh.xlsx",
-    "rows_written": 508275
+    "state": "UTTARAKHAND",
+    "next_offset": 63000,
+    "xlsx_path": "data/suppliers/suppliers_Uttarakhand.xlsx",
+    "rows_written": 8505
   },
   "runs_without_progress": 0
 }
