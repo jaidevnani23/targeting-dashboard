@@ -40,9 +40,9 @@
   ],
   "in_progress": {
     "state": "UTTAR PRADESH",
-    "next_offset": 2458000,
+    "next_offset": 4312000,
     "xlsx_path": "data/suppliers/suppliers_Uttar_Pradesh.xlsx",
-    "rows_written": 291717
+    "rows_written": 508275
   },
   "runs_without_progress": 0
 }
