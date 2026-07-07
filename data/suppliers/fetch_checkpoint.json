@@ -42,9 +42,9 @@
   ],
   "in_progress": {
     "state": "WEST BENGAL",
-    "next_offset": 1216000,
+    "next_offset": 1864000,
     "xlsx_path": "data/suppliers/suppliers_West_Bengal.xlsx",
-    "rows_written": 177212
+    "rows_written": 272077
   },
   "runs_without_progress": 0
 }
